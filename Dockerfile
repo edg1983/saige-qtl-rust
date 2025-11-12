@@ -19,6 +19,9 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /build
 
+# Set environment variable for PyO3 compatibility with Python 3.13
+ENV PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
+
 # Copy only dependency files first for better caching
 COPY Cargo.toml Cargo.lock ./
 
