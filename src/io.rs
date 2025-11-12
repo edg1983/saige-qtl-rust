@@ -1,5 +1,6 @@
 //! Module for handling I/O, data loading, and sample alignment.
-use polars::prelude::*;
+// ADDED: Import IndexOrder
+use polars::prelude::{IndexOrder, *};
 use std::path::Path;
 // Need File for the new CsvReader API
 use std::fs::File;
@@ -49,8 +50,8 @@ pub fn load_aligned_data(
     // CORRECTED: `CsvReader::from_path` is now `CsvReader::new(File::open(..))`
     let pheno_file_handle = File::open(pheno_file)?;
     let pheno_df = CsvReader::new(pheno_file_handle)
-        // CORRECTED: `with_has_header` is now `set_has_header`
-        .set_has_header(true)
+        // FIXED: `set_has_header` is now `with_has_header`
+        .with_has_header(true)
         .with_delimiter(b'\t') // Assuming tsv
         .finish()?;
 
@@ -58,8 +59,8 @@ pub fn load_aligned_data(
     // CORRECTED: `CsvReader::from_path` is now `CsvReader::new(File::open(..))`
     let covar_file_handle = File::open(covar_file)?;
     let covar_df = CsvReader::new(covar_file_handle)
-        // CORRECTED: `with_has_header` is now `set_has_header`
-        .set_has_header(true)
+        // FIXED: `set_has_header` is now `with_has_header`
+        .with_has_header(true)
         .with_delimiter(b'\t') // Assuming tsv
         .finish()?;
 
@@ -137,7 +138,8 @@ pub fn load_aligned_data(
     x.column_mut(0).assign(&intercept);
     
     // CORRECTED: `aligned_covar` is now in scope
-    let covar_matrix_no_intercept = aligned_covar.to_ndarray::<Float64Type>()?;
+    // FIXED: `IndexOrder::F` is now `IndexOrder::ColumnMajor`.
+    let covar_matrix_no_intercept = aligned_covar.to_ndarray::<Float64Type>(IndexOrder::ColumnMajor)?;
     x.slice_mut(s![.., 1..]).assign(&covar_matrix_no_intercept); // This line now works
 
     if y.len() != n_samples || x.nrows() != n_samples {
@@ -161,8 +163,8 @@ pub fn get_fam_samples(plink_file_no_ext: &Path) -> Result<Vec<String>, IoError>
     // CORRECTED: `CsvReader::from_path` is now `CsvReader::new(File::open(..))`
     let fam_file_handle = File::open(&fam_path)?;
     let fam_df = CsvReader::new(fam_file_handle)
-        // CORRECTED: `with_has_header` is now `set_has_header`
-        .set_has_header(false)
+        // FIXED: `set_has_header` is now `with_has_header`
+        .with_has_header(false)
         .with_delimiter(b' ') // .fam is space-delimited
         .finish()?;
 

@@ -96,11 +96,10 @@ pub fn run_parallel_tests(
             let chr_bytes = header.rid2name(record.rid().unwrap()).unwrap();
             let chr = String::from_utf8_lossy(chr_bytes).to_string();
             let pos = record.pos();
-            // CORRECTED: Use `as_deref` to fix type ambiguity (Errors 8, 9)
-            let rsid = record.id()
-                .as_deref() // Converts Option<Vec<u8>> -> Option<&[u8]>
-                .map(|v_slice| String::from_utf8_lossy(v_slice).to_string())
-                .unwrap_or_else(|| ".".to_string());
+            // FIXED: The `match` statement was confusing the compiler.
+            // Based on the *original* errors, `record.id()` returns `Vec<u8>`.
+            let id_bytes = record.id();
+            let rsid = String::from_utf8_lossy(&id_bytes).to_string();
 
             // 1. Extract Genotypes
             let g = match extract_genotypes(&mut record, header, vcf_field, &vcf_indices) {

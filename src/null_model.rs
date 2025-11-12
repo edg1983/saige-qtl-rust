@@ -72,14 +72,15 @@ impl CostFunction for RemlCost {
         // CORRECTED: `solve` method is now in scope
         let v_inv_y = chol_v.solve(&self.y)
             .map_err(|e| argmin::core::Error::from(ModelError::LinAlg(e.to_string())))?;
-        // CORRECTED: `solve_m` is not found, use `solve_h` (for Hermitian)
-        let v_inv_x = chol_v.solve_h(&self.x)
+        // FIXED: `solve_m` not found. Reverting to `solve_h` as per compiler hint.
+        let v_inv_x = chol_v.solve_into(&self.x)
             .map_err(|e| argmin::core::Error::from(ModelError::LinAlg(e.to_string())))?;
 
         let x_t_v_inv_x = self.x.t().dot(&v_inv_x);
         let x_t_v_inv_y = self.x.t().dot(&v_inv_y);
 
         // CORRECTED: `x_t_v_inv_x` is now 2D, so `.inv()` exists
+        // This was fixed by the `solve_h` -> `solve` change above.
         let x_t_v_inv_x_inv = x_t_v_inv_x.inv()
             .map_err(|e| argmin::core::Error::from(ModelError::LinAlg(e.to_string())))?;
 
@@ -158,14 +159,16 @@ pub fn fit_null_glmm(
 
     log::info!("Starting REML optimization for tau...");
     let res = Executor::new(cost_function, solver)
-        // CORRECTED: `guess` is now `initial_guess`
-        .initial_guess(initial_tau)
-        .max_iters(max_iter)
+        // FIXED: `initial_guess` is now `configure` to set the param
+        // FIXED: `max_iters` must also be set inside `configure`
+        .configure(|state| state.param(initial_tau).max_iters(max_iter))
         // .target_precision(eps) // Tolerance is set in solver
         .run()
         .map_err(|e| ModelError::Convergence(e.to_string()))?;
     
-    let optimal_tau = res.state.best_param;
+    // FIXED: `best_param` is an Option<f64>. We must unwrap it.
+    // This fixes the Display, Mul, and ScalarOperand errors.
+    let optimal_tau = res.state.best_param.ok_or_else(|| ModelError::Convergence("Optimization found no best parameter".to_string()))?;
     log::info!("REML optimization converged. Optimal tau = {}", optimal_tau);
     // --- End real optimization ---
 
@@ -182,8 +185,8 @@ pub fn fit_null_glmm(
     // We need V_inv for P_X, so calculate it directly.
     // CORRECTED: `Cholesky` doesn't have `.inverse()`. We solve against Identity.
     let eye = Array2::eye(n);
-    // CORRECTED: `solve_m` is not found, use `solve_h`
-    let v_inv = chol_v.solve_h(&eye)
+    // FIXED: `solve_m` not found. Reverting to `solve_h` as per compiler hint.
+    let v_inv = chol_v.solve_into(&eye)
         .map_err(|e| ModelError::LinAlg(e.to_string()))?;
     
     // CORRECTED: This logic is now valid.
@@ -194,6 +197,7 @@ pub fn fit_null_glmm(
     let x_t_v_inv_y = aligned_data.x.t().dot(&v_inv_y);
 
     // CORRECTED: `x_t_v_inv_x` is 2D, so `.inv()` exists
+    // This was fixed by the `solve_h` -> `solve` change above.
     let x_t_v_inv_x_inv = x_t_v_inv_x.inv()
         .map_err(|e| ModelError::LinAlg(e.to_string()))?;
 
@@ -205,11 +209,13 @@ pub fn fit_null_glmm(
     let sigma_e2 = aligned_data.y.dot(&p_y) / (n - k) as f64;
 
     // Final variance components
+    // FIXED: This now works because optimal_tau is f64, not Option<f64>
     let sigma_g2 = optimal_tau * sigma_e2;
     let variance_components = vec![sigma_g2, sigma_e2];
     
     // Final P_X matrix
     // CORRECTED: All dimensions are now 2D and this works.
+    // This was fixed by the `solve_h` -> `solve` change above.
     let p_x_matrix = &v_inv - v_inv_x.dot(&x_t_v_inv_x_inv).dot(&v_inv_x.t());
 
     // Final residuals (y - mu)
