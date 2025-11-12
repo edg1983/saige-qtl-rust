@@ -31,6 +31,30 @@ Executables will be available in `target/release/`:
 - `step1-fit-null` - Fits the null model
 - `step2-run-tests` - Runs association tests
 
+### Docker Installation
+
+For easier deployment across different systems, use the provided Docker container:
+
+#### Build the Docker Image
+
+```bash
+docker build -t saige-qtl-rust:latest .
+```
+
+#### Pull from Registry (if available)
+
+```bash
+docker pull ghcr.io/edg1983/saige-qtl-rust:latest
+```
+
+#### Quick Test
+
+```bash
+# Test that the container works
+docker run --rm saige-qtl-rust:latest step1-fit-null --help
+docker run --rm saige-qtl-rust:latest step2-run-tests --help
+```
+
 ## Usage
 
 ### Step 1: Fit Null Model
@@ -162,6 +186,82 @@ target/release/step2-run-tests \
   --output-file results/ENSG00000000003.associations.txt.gz \
   --min-mac 5 \
   --n-threads 16
+```
+
+## Docker Usage
+
+### Running with Docker
+
+Mount your data directory and run the analysis inside the container:
+
+```bash
+# Step 1: Fit null model
+docker run --rm \
+  -v /path/to/data:/data:ro \
+  -v /path/to/output:/output \
+  -u $(id -u):$(id -g) \
+  saige-qtl-rust:latest \
+  step1-fit-null \
+    --plink-file /data/genotypes \
+    --pheno-file /data/expression.tsv \
+    --trait-name ENSG00000000003 \
+    --covar-file /data/covariates.tsv \
+    --sample-id-in-pheno individual_id \
+    --sample-id-in-covar individual_id \
+    --trait-type quantitative \
+    --output-prefix /output/null_model \
+    --n-threads 16
+
+# Step 2: Run association tests
+docker run --rm \
+  -v /path/to/data:/data:ro \
+  -v /path/to/output:/output \
+  -u $(id -u):$(id -g) \
+  saige-qtl-rust:latest \
+  step2-run-tests \
+    --vcf-file /data/chr1.vcf.gz \
+    --vcf-field DS \
+    --pheno-file /data/expression.tsv \
+    --sample-id-in-pheno individual_id \
+    --trait-name ENSG00000000003 \
+    --covar-file /data/covariates.tsv \
+    --sample-id-in-covar individual_id \
+    --step1-output-file /output/null_model.ENSG00000000003.model.bin \
+    --region chr1:50000000-51000000 \
+    --output-file /output/ENSG00000000003.associations.txt.gz \
+    --min-mac 5 \
+    --n-threads 16
+```
+
+### Singularity
+
+For HPC environments that use Singularity:
+
+```bash
+# Convert Docker image to Singularity
+singularity pull saige-qtl-rust.sif docker://saige-qtl-rust:latest
+
+# Or build directly from Dockerfile
+singularity build saige-qtl-rust.sif docker-daemon://saige-qtl-rust:latest
+
+# Run Step 1
+singularity exec \
+  --bind /path/to/data:/data \
+  --bind /path/to/output:/output \
+  saige-qtl-rust.sif \
+  step1-fit-null \
+    --plink-file /data/genotypes \
+    --pheno-file /data/expression.tsv \
+    [other options...]
+
+# Run Step 2
+singularity exec \
+  --bind /path/to/data:/data \
+  --bind /path/to/output:/output \
+  saige-qtl-rust.sif \
+  step2-run-tests \
+    --vcf-file /data/chr1.vcf.gz \
+    [other options...]
 ```
 
 ## Input File Formats
