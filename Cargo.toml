@@ -1,0 +1,76 @@
+[package]
+name = "saige-qtl-rust"
+version = "0.1.0"
+edition = "2024"
+authors = ["Edoardo Giacopuzzi <edoardo.giacopuzzi@fht.org>"]
+description = "A high-performance Rust port of SAIGEQTL for single-cell eQTL analysis"
+
+# This binary is the equivalent of extdata/step1_fitNULLGLMM_qtl.R
+[[bin]]
+name = "step1-fit-null"
+path = "src/bin/step1.rs"
+
+# This binary is the equivalent of extdata/step2_tests_qtl.R
+[[bin]]
+name = "step2-run-tests"
+path = "src/bin/step2.rs"
+
+[dependencies]
+# ... CLI ---
+# clap is the standard for fast, robust CLI argument parsing
+clap = { version = "4.5.4", features = ["derive"] }
+
+# --- Parallelism ---
+# rayon is our primary tool for data parallelism
+rayon = "1.10.0"
+
+# --- Data Handling & I/O ---
+# polars is the fastest DataFrame library available, for pheno/covar files
+polars = { version = "0.41.0", features = ["csv", "lazy", "ndarray"] }
+# rust-htslib provides safe, efficient bindings to htslib for VCF/BCF reading
+rust-htslib = "0.51.0"
+# bed-reader is for reading PLINK .bed files to construct the GRM
+bed-reader = "0.2.0"
+# serde is for (de)serializing the model fit
+serde = { version = "1.0.203", features = ["derive"] }
+# bincode is a fast binary format for saving the Step 1 model
+bincode = "1.3.3"
+# flate2 for compressed output
+flate2 = "1.0.30"
+# thiserror for custom errors
+thiserror = "1.0.61"
+# csv for writing results
+csv = "1.3.0"
+
+# --- Core Numerics & Statistics ---
+# ndarray is the base N-dimensional array (matrix) library
+ndarray = { version = "0.15.6", features = ["rayon", "serde"] }
+# ndarray-linalg provides BLAS/LAPACK bindings for high-performance linear algebra
+# This is critical for the mixed model fitting
+ndarray-linalg = { version = "0.16.0", features = ["openblas-system"] }
+# Alternatively, `faer` is a promising pure-Rust linear algebra library
+# faer = "0.18.0"
+# sprs for sparse matrix operations (e.g., for sparse expression data)
+sprs = "0.11.1"
+
+# --- Optimization & Roots ---
+# argmin is the core optimizer framework
+argmin = { version = "0.11.0"}
+# argmin is a pure-Rust optimization framework. We'll need this for the REML.
+argmin-math = { version = "0.5.1", features = ["ndarray_v0_15", "primitives"] }
+# rand for any stochastic processes or sampling
+rand = "0.8.5"
+# statrs for statistical distributions (CDF, PDF, etc.)
+statrs = "0.16.0"
+
+# --- Logging ---
+log = "0.4.21"
+env_logger = "0.11.3"
+
+[profile.release]
+# Enable Link-Time Optimization for maximum speed
+lto = "fat"
+# Optimize for speed, not binary size
+opt-level = 3
+# Remove debug info from release builds
+strip = true
