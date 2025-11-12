@@ -1,6 +1,7 @@
 # Multi-stage build for saige-qtl-rust
 # Stage 1: Build the Rust binaries
-FROM rust:1.82-slim AS builder
+# Use Rust 1.84+ which supports edition 2024 dependencies
+FROM rust:slim AS builder
 
 # Install system dependencies required for compilation
 RUN apt-get update && apt-get install -y \
