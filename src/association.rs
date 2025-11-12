@@ -57,7 +57,7 @@ pub fn run_parallel_tests(
 ) -> Result<(), Box<dyn std::error::Error>> {
     
     let mut vcf = bcf::IndexedReader::from_path(vcf_file)?;
-    let header = vcf.header();
+    let header = vcf.header().clone(); // Clone the header to avoid borrowing issues
     
     // Align VCF samples to null model samples
     let vcf_samples = header.samples();
@@ -82,27 +82,32 @@ pub fn run_parallel_tests(
 
     if let Some(r) = region {
         // CORRECTED: `fetch_str` is gone. Parse region and use `fetch`.
-        let (rid, start, end) = parse_region(r, header)?;
+        let (rid, start, end) = parse_region(r, &header)?;
         vcf.fetch(rid, start, end)?;
     }
     
-    // Buffer records for parallel processing
-    let records: Vec<_> = vcf.records().collect::<Result<_, _>>()?;
+    // Buffer records for parallel processing and extract metadata that requires header access
+    // This avoids capturing the non-Sync header in the parallel closure
+    let mut record_data: Vec<_> = Vec::new();
+    for record_result in vcf.records() {
+        let record = record_result?;
+        
+        // Extract information that requires header access
+        let chr_bytes = header.rid2name(record.rid().unwrap()).unwrap();
+        let chr = String::from_utf8_lossy(chr_bytes).to_string();
+        let pos = record.pos();
+        let id_bytes = record.id();
+        let rsid = String::from_utf8_lossy(&id_bytes).to_string();
+        
+        record_data.push((record, chr, pos, rsid));
+    }
 
-    let results: Vec<AssocResult> = records
+    let results: Vec<AssocResult> = record_data
         .into_par_iter()
-        .filter_map(|mut record| {
-            // CORRECTED: `chr` is `&[u8]`, must be converted.
-            let chr_bytes = header.rid2name(record.rid().unwrap()).unwrap();
-            let chr = String::from_utf8_lossy(chr_bytes).to_string();
-            let pos = record.pos();
-            // FIXED: The `match` statement was confusing the compiler.
-            // Based on the *original* errors, `record.id()` returns `Vec<u8>`.
-            let id_bytes = record.id();
-            let rsid = String::from_utf8_lossy(&id_bytes).to_string();
+        .filter_map(|(mut record, chr, pos, rsid)| {
 
-            // 1. Extract Genotypes
-            let g = match extract_genotypes(&mut record, header, vcf_field, &vcf_indices) {
+            // 1. Extract Genotypes (no header needed in extract_genotypes)
+            let g = match extract_genotypes(&mut record, vcf_field, &vcf_indices) {
                 Ok(g) => g,
                 Err(_) => return None, // Skip variant
             };
@@ -174,8 +179,6 @@ fn align_samples(vcf_samples: &[&[u8]], model_samples: &[String]) -> (Vec<usize>
 /// Extracts a genotype vector 'g' aligned to the model
 fn extract_genotypes(
     record: &mut bcf::Record,
-    // CORRECTED: Mark `header` as unused
-    _header: &rust_htslib::bcf::header::HeaderView, // <-- Fixed to full, public path
     vcf_field: &str,
     vcf_indices: &[usize], // Indices of VCF samples that overlap with model
 ) -> Result<Array1<f64>, Box<dyn std::error::Error>> {

@@ -2,8 +2,6 @@
 // ADDED: Import IndexOrder
 use polars::prelude::{IndexOrder, *};
 use std::path::Path;
-// Need File for the new CsvReader API
-use std::fs::File;
 use ndarray::{Array1, Array2, s}; // <-- Added 's' macro import
 use thiserror::Error;
 
@@ -47,21 +45,25 @@ pub fn load_aligned_data(
     ])?;
 
     // 1. Load Phenotype
-    // CORRECTED: `CsvReader::from_path` is now `CsvReader::new(File::open(..))`
-    let pheno_file_handle = File::open(pheno_file)?;
-    let pheno_df = CsvReader::new(pheno_file_handle)
-        // FIXED: `set_has_header` is now `with_has_header`
+    // In Polars 0.41.x, CsvReadOptions is used to configure the reader
+    let pheno_df = CsvReadOptions::default()
         .with_has_header(true)
-        .with_delimiter(b'\t') // Assuming tsv
+        .with_parse_options(
+            CsvParseOptions::default()
+                .with_separator(b'\t')
+        )
+        .try_into_reader_with_file_path(Some(pheno_file.into()))?
         .finish()?;
 
     // 2. Load Covariates
-    // CORRECTED: `CsvReader::from_path` is now `CsvReader::new(File::open(..))`
-    let covar_file_handle = File::open(covar_file)?;
-    let covar_df = CsvReader::new(covar_file_handle)
-        // FIXED: `set_has_header` is now `with_has_header`
+    // In Polars 0.41.x, CsvReadOptions is used to configure the reader
+    let covar_df = CsvReadOptions::default()
         .with_has_header(true)
-        .with_delimiter(b'\t') // Assuming tsv
+        .with_parse_options(
+            CsvParseOptions::default()
+                .with_separator(b'\t')
+        )
+        .try_into_reader_with_file_path(Some(covar_file.into()))?
         .finish()?;
 
     // 3. Align pheno and covar to master list
@@ -69,7 +71,7 @@ pub fn load_aligned_data(
     let aligned_pheno = master_df.clone()
         .lazy()
         .join(
-            pheno_df.lazy(),
+            pheno_df.clone().lazy(),
             [col("MASTER_SAMPLES")],
             [col(sample_id_pheno)],
             JoinType::Inner.into(),
@@ -79,10 +81,10 @@ pub fn load_aligned_data(
         .collect()?;
 
     // CORRECTED: Re-added the missing definition for `aligned_covar`
-    let aligned_covar = master_df
+    let aligned_covar = master_df.clone()
         .lazy()
         .join(
-            covar_df.lazy(),
+            covar_df.clone().lazy(),
             [col("MASTER_SAMPLES")],
             [col(sample_id_covar)],
             JoinType::Inner.into(),
@@ -138,8 +140,8 @@ pub fn load_aligned_data(
     x.column_mut(0).assign(&intercept);
     
     // CORRECTED: `aligned_covar` is now in scope
-    // FIXED: `IndexOrder::F` is now `IndexOrder::ColumnMajor`.
-    let covar_matrix_no_intercept = aligned_covar.to_ndarray::<Float64Type>(IndexOrder::ColumnMajor)?;
+    // FIXED: `IndexOrder::F` is now `IndexOrder::Fortran`.
+    let covar_matrix_no_intercept = aligned_covar.to_ndarray::<Float64Type>(IndexOrder::Fortran)?;
     x.slice_mut(s![.., 1..]).assign(&covar_matrix_no_intercept); // This line now works
 
     if y.len() != n_samples || x.nrows() != n_samples {
@@ -160,12 +162,14 @@ pub fn get_fam_samples(plink_file_no_ext: &Path) -> Result<Vec<String>, IoError>
         return Err(IoError::NotFound(fam_path.to_string_lossy().into()));
     }
     
-    // CORRECTED: `CsvReader::from_path` is now `CsvReader::new(File::open(..))`
-    let fam_file_handle = File::open(&fam_path)?;
-    let fam_df = CsvReader::new(fam_file_handle)
-        // FIXED: `set_has_header` is now `with_has_header`
+    // In Polars 0.41.x, CsvReadOptions is used to configure the reader
+    let fam_df = CsvReadOptions::default()
         .with_has_header(false)
-        .with_delimiter(b' ') // .fam is space-delimited
+        .with_parse_options(
+            CsvParseOptions::default()
+                .with_separator(b' ')
+        )
+        .try_into_reader_with_file_path(Some(fam_path.clone().into()))?
         .finish()?;
 
     let sample_ids: Vec<String> = fam_df
