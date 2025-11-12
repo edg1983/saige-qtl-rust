@@ -128,6 +128,8 @@ Generates a tab-delimited gzipped file with columns:
 - `pos`: Position
 - `rsid`: Variant ID
 - `gene`: Gene/trait name
+- `beta`: Effect size estimate
+- `se`: Standard error of the effect size
 - `pval`: Association p-value
 - `mac`: Minor Allele Count
 

@@ -118,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .from_writer(out_writer_gz);
         
     // Write header
-    csv_writer.write_record(&["chr", "pos", "rsid", "gene", "pval", "mac"])?;
+    csv_writer.write_record(&["chr", "pos", "rsid", "gene", "beta", "se", "pval", "mac"])?;
 
     // ===================================================================
     // 3. Run Association Tests

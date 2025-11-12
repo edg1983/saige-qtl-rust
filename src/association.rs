@@ -18,7 +18,8 @@ struct AssocResult {
     pos: i64,
     rsid: String,
     gene: String,
-    // TODO: Add other fields like BETA, SE
+    beta: f64,
+    se: f64,
     pval: f64,
     mac: f64,
 }
@@ -123,7 +124,13 @@ pub fn run_parallel_tests(
             
             if var <= 1e-6 { return None; } // No variance
 
-            // 4. Calculate P-value
+            // 4. Calculate effect size (BETA) and standard error (SE)
+            // BETA = Score / Variance
+            // SE = 1 / sqrt(Variance)
+            let beta = score / var;
+            let se = 1.0 / var.sqrt();
+
+            // 5. Calculate P-value
             let pval = if null_model.trait_type == TraitType::Quantitative {
                 // Standard score test (Chi-sq 1-dof)
                 let chi_sq = score * score / var;
@@ -140,6 +147,8 @@ pub fn run_parallel_tests(
                 pos,
                 rsid,
                 gene: null_model.gene_name.clone(),
+                beta,
+                se,
                 pval,
                 mac,
             })
