@@ -16,13 +16,6 @@ use saige_qtl_rust::{
 };
 use std::path::PathBuf;
 
-/// Helper function to parse tauInit string "val1,val2"
-fn parse_tau_init(s: &str) -> Result<Vec<f64>, String> {
-    s.split(',')
-        .map(|v| v.parse::<f64>().map_err(|e| e.to_string()))
-        .collect()
-}
-
 #[derive(Parser, Debug)]
 #[command(
     name = "step1-fit-null",
@@ -67,7 +60,7 @@ struct Cli {
     n_threads: usize,
 
     /// Initial values for tau (variance ratio) and sigma_e, comma-separated (e.g., "0.1,0.5")
-    #[arg(long, default_value = "0.1,0.5", value_parser = parse_tau_init)]
+    #[arg(long, default_value = "0.1,0.5", value_delimiter = ',')]
     tau_init: Vec<f64>,
 
     /// Maximum iterations for REML optimization
