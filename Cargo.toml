@@ -1,7 +1,7 @@
 [package]
 name = "saige-qtl-rust"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 authors = ["Edoardo Giacopuzzi <edoardo.giacopuzzi@fht.org>"]
 description = "A high-performance Rust port of SAIGEQTL for single-cell eQTL analysis"
 
