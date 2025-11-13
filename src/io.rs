@@ -46,7 +46,7 @@ pub fn load_aligned_data(
 
     // 1. Load Phenotype
     // In Polars 0.41.x, CsvReadOptions is used to configure the reader
-    let pheno_df = CsvReadOptions::default()
+    let mut pheno_df = CsvReadOptions::default()
         .with_has_header(true)
         .with_parse_options(
             CsvParseOptions::default()
@@ -54,10 +54,15 @@ pub fn load_aligned_data(
         )
         .try_into_reader_with_file_path(Some(pheno_file.into()))?
         .finish()?;
+    
+    // Cast sample ID column to string to handle both numeric and string IDs
+    let pheno_id_col = pheno_df.column(sample_id_pheno)?.clone();
+    let pheno_id_as_str = pheno_id_col.cast(&DataType::String)?;
+    pheno_df.replace(sample_id_pheno, pheno_id_as_str)?;
 
     // 2. Load Covariates
     // In Polars 0.41.x, CsvReadOptions is used to configure the reader
-    let covar_df = CsvReadOptions::default()
+    let mut covar_df = CsvReadOptions::default()
         .with_has_header(true)
         .with_parse_options(
             CsvParseOptions::default()
@@ -65,6 +70,11 @@ pub fn load_aligned_data(
         )
         .try_into_reader_with_file_path(Some(covar_file.into()))?
         .finish()?;
+    
+    // Cast sample ID column to string to handle both numeric and string IDs
+    let covar_id_col = covar_df.column(sample_id_covar)?.clone();
+    let covar_id_as_str = covar_id_col.cast(&DataType::String)?;
+    covar_df.replace(sample_id_covar, covar_id_as_str)?;
 
     // 3. Align pheno and covar to master list
     // This join ensures we are in the correct order and subset
