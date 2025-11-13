@@ -30,7 +30,8 @@ RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
     mkdir -p src/bin && \
     echo "fn main() {}" > src/bin/step1.rs && \
-    echo "fn main() {}" > src/bin/step2.rs
+    echo "fn main() {}" > src/bin/step2.rs && \
+    echo "fn main() {}" > src/bin/compute-grm.rs
 
 # Build dependencies (this layer will be cached)
 RUN cargo build --release && \
@@ -41,11 +42,11 @@ COPY src ./src
 
 # Build the actual binaries
 # Touch files to ensure rebuild
-RUN touch src/lib.rs src/bin/step1.rs src/bin/step2.rs && \
+RUN touch src/lib.rs src/bin/step1.rs src/bin/step2.rs src/bin/compute-grm.rs && \
     cargo build --release
 
 # Verify binaries were built
-RUN ls -lh target/release/step1-fit-null target/release/step2-run-tests
+RUN ls -lh target/release/step1-fit-null target/release/step2-run-tests target/release/compute-grm
 
 # Stage 2: Create minimal runtime image
 FROM debian:bookworm-slim
@@ -67,9 +68,10 @@ RUN useradd -m -u 1000 -s /bin/bash saige && \
 # Copy binaries from builder
 COPY --from=builder /build/target/release/step1-fit-null /usr/local/bin/
 COPY --from=builder /build/target/release/step2-run-tests /usr/local/bin/
+COPY --from=builder /build/target/release/compute-grm /usr/local/bin/
 
 # Make binaries executable
-RUN chmod +x /usr/local/bin/step1-fit-null /usr/local/bin/step2-run-tests
+RUN chmod +x /usr/local/bin/step1-fit-null /usr/local/bin/step2-run-tests /usr/local/bin/compute-grm
 
 # Set up environment
 ENV RUST_LOG=info
