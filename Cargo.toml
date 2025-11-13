@@ -15,6 +15,11 @@ path = "src/bin/step1.rs"
 name = "step2-run-tests"
 path = "src/bin/step2.rs"
 
+# Pre-compute and save GRM for reuse across multiple traits
+[[bin]]
+name = "compute-grm"
+path = "src/bin/compute-grm.rs"
+
 [dependencies]
 # ... CLI ---
 # clap is the standard for fast, robust CLI argument parsing

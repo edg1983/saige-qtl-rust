@@ -3,6 +3,21 @@ use bed_reader::Bed;
 use ndarray::{Array2, Axis}; // Removed unused 's'
 use rayon::prelude::*;
 use std::path::Path;
+use std::fs::File;
+use std::io::BufReader;
+
+/// Loads a pre-computed GRM from a binary file
+pub fn load_grm_from_file(grm_file: &Path) -> Result<Array2<f64>, Box<dyn std::error::Error>> {
+    log::info!("Loading pre-computed GRM from {:?}", grm_file);
+    
+    let file = File::open(grm_file)?;
+    let reader = BufReader::new(file);
+    let grm: Array2<f64> = bincode::deserialize_from(reader)?;
+    
+    log::info!("GRM loaded: {} x {} matrix", grm.nrows(), grm.ncols());
+    
+    Ok(grm)
+}
 
 /// Calculates the GRM (A = XX^T / M) from a PLINK .bed file.
 /// Assumes the .bed file samples are in the *exact* order as `master_sample_ids`.

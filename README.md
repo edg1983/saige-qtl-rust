@@ -29,6 +29,7 @@ cargo build --release
 ```
 
 Executables will be available in `target/release/`:
+- `compute-grm` - Pre-computes the GRM (one-time setup)
 - `step1-fit-null` - Fits the null model
 - `step2-run-tests` - Runs association tests
 
@@ -52,11 +53,33 @@ docker pull ghcr.io/edg1983/saige-qtl-rust:latest
 
 ```bash
 # Test that the container works
+docker run --rm saige-qtl-rust:latest compute-grm --help
 docker run --rm saige-qtl-rust:latest step1-fit-null --help
 docker run --rm saige-qtl-rust:latest step2-run-tests --help
 ```
 
 ## Usage
+
+### Compute GRM (One-time Setup)
+
+Pre-compute the Genetic Relationship Matrix (GRM) once for your dataset. This significantly speeds up Step 1 when analyzing multiple traits/genes.
+
+```bash
+target/release/compute-grm \
+  --plink-file data/genotypes \
+  --output-file data/genotypes.grm.bin \
+  --n-threads 16
+```
+
+#### Arguments
+
+| Argument        | Description                                |
+| --------------- | ------------------------------------------ |
+| `--plink-file`  | Path to PLINK file prefix (.bed/.bim/.fam) |
+| `--output-file` | Output path for the GRM (binary format)    |
+| `--n-threads`   | Number of threads to use (default: 1)      |
+
+**Note**: The GRM file can be reused for all traits analyzed on the same set of samples.
 
 ### Step 1: Fit Null Model
 
@@ -65,6 +88,7 @@ Fits a null Generalized Linear Mixed Model (GLMM) to estimate variance component
 ```bash
 target/release/step1-fit-null \
   --plink-file data/genotypes \
+  --grm-file data/genotypes.grm.bin \
   --pheno-covar-file data/phenotypes_and_covariates.tsv \
   --trait-name GENE1 \
   --sample-id-col IID \
@@ -79,14 +103,17 @@ target/release/step1-fit-null \
 
 #### Required Arguments
 
-| Argument             | Description                                                    |
-| -------------------- | -------------------------------------------------------------- |
-| `--plink-file`       | Path to PLINK file prefix (.bed/.bim/.fam) for GRM calculation |
-| `--pheno-covar-file` | Path to file containing both phenotypes and covariates (TSV)   |
-| `--trait-name`       | Column name for the trait/gene to analyze                      |
-| `--sample-id-col`    | Column name for sample IDs                                     |
-| `--covariate-cols`   | Comma-separated list of covariate column names                 |
-| `--trait-type`       | Type of trait: `quantitative`, `binary`, or `count`            |
+| Argument             | Description                                                  |
+| -------------------- | ------------------------------------------------------------ |
+| `--plink-file`       | Path to PLINK file prefix (.bed/.bim/.fam) for sample list   |
+| `--grm-file`         | Path to pre-computed GRM file (optional, see compute-grm)    |
+| `--pheno-covar-file` | Path to file containing both phenotypes and covariates (TSV) |
+| `--trait-name`       | Column name for the trait/gene to analyze                    |
+| `--sample-id-col`    | Column name for sample IDs                                   |
+| `--covariate-cols`   | Comma-separated list of covariate column names               |
+| `--trait-type`       | Type of trait: `quantitative`, `binary`, or `count`          |
+
+**Note**: If `--grm-file` is not provided, the GRM will be computed on-the-fly from the PLINK files (slower).
 
 #### Optional Arguments
 
@@ -161,9 +188,16 @@ Generates a tab-delimited gzipped file with columns:
 ## Example Workflow
 
 ```bash
+# Step 0: Pre-compute GRM (one-time setup)
+target/release/compute-grm \
+  --plink-file data/genotypes \
+  --output-file data/genotypes.grm.bin \
+  --n-threads 16
+
 # Step 1: Fit null model for a gene
 target/release/step1-fit-null \
   --plink-file data/genotypes \
+  --grm-file data/genotypes.grm.bin \
   --pheno-covar-file data/expression_with_covariates.tsv \
   --trait-name ENSG00000000003 \
   --sample-id-col individual_id \

@@ -10,7 +10,7 @@
 use clap::Parser;
 use saige_qtl_rust::{
     io::{get_fam_samples, load_aligned_data},
-    grm::build_grm_from_plink,
+    grm::{build_grm_from_plink, load_grm_from_file},
     null_model::fit_null_glmm,
     TraitType
 };
@@ -23,9 +23,14 @@ use std::path::PathBuf;
     about = "Fits a null GLMM for SAIGEQTL analysis (Rust port)"
 )]
 struct Cli {
-    /// Path to the PLINK file prefix (.bed/.bim/.fam) for GRM calculation
+    /// Path to the PLINK file prefix (.bed/.bim/.fam) for sample list
     #[arg(long, required = true)]
     plink_file: PathBuf,
+
+    /// Path to pre-computed GRM file (use compute-grm to generate this)
+    /// If not provided, GRM will be computed from PLINK files (slower)
+    #[arg(long)]
+    grm_file: Option<PathBuf>,
 
     /// Path to the file containing both phenotypes and covariates
     #[arg(long, required = true)]
@@ -106,19 +111,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("{} samples aligned between .fam and data file.", aligned_data.sample_ids.len());
 
     // ===================================================================
-    // 3. Build GRM
+    // 3. Load or Build GRM
     // ===================================================================
-    // NOTE: This assumes the .bed file is ordered identically to the .fam file,
-    // which bed-rs guarantees.
-    log::info!("Building GRM from PLINK file: {:?}", cli.plink_file);
-    let grm = build_grm_from_plink(&cli.plink_file, cli.n_threads)?;
+    let grm = if let Some(grm_file) = &cli.grm_file {
+        // Load pre-computed GRM
+        log::info!("Loading pre-computed GRM from {:?}", grm_file);
+        load_grm_from_file(grm_file)?
+    } else {
+        // Compute GRM from PLINK files
+        log::info!("Computing GRM from PLINK file: {:?}", cli.plink_file);
+        log::warn!("Computing GRM on-the-fly. For better performance, pre-compute with 'compute-grm' and use --grm-file");
+        build_grm_from_plink(&cli.plink_file, cli.n_threads)?
+    };
     
-    // We must subset the GRM to match the *aligned* samples
-    // This is complex. For now, we assume `load_aligned_data`
-    // *only* returns samples present in the .fam, and `build_grm_from_plink`
-    // builds the GRM for *all* samples.
-    // TODO: Add subsetting of GRM based on `aligned_data.sample_ids`
-    log::info!("(Stub) Assuming GRM samples match aligned data.");
+    log::info!("GRM ready: {} x {} matrix", grm.nrows(), grm.ncols());
+    
+    // Verify GRM dimensions match FAM samples
+    if grm.nrows() != master_sample_ids.len() {
+        return Err(format!(
+            "GRM dimension mismatch: GRM is {} x {} but FAM file has {} samples",
+            grm.nrows(), grm.ncols(), master_sample_ids.len()
+        ).into());
+    }
 
     // ===================================================================
     // 4. Fit Null GLMM
