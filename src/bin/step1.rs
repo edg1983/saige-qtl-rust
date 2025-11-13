@@ -1,9 +1,9 @@
 //! Step 1: Fit Null GLMM
 //!
 //! This binary is the Rust equivalent of `extdata/step1_fitNULLGLMM_qtl.R`.
-//! It reads phenotype, covariate, and genotype data to fit a
-//! null Generalized Linear Mixed Model (GLMM) and estimates
-//! the variance components.
+//! It reads a single file containing both phenotypes and covariates along with 
+//! genotype data to fit a null Generalized Linear Mixed Model (GLMM) and 
+//! estimates the variance components.
 //!
 //! The output is a serialized `NullModelFit` struct.
 
@@ -27,25 +27,21 @@ struct Cli {
     #[arg(long, required = true)]
     plink_file: PathBuf,
 
-    /// Path to the phenotype file
+    /// Path to the file containing both phenotypes and covariates
     #[arg(long, required = true)]
-    pheno_file: PathBuf,
+    pheno_covar_file: PathBuf,
 
-    /// Column name in the phenotype file for the trait (gene)
+    /// Column name for the trait (gene) to analyze
     #[arg(long, required = true)]
     trait_name: String,
 
-    /// Path to the covariate file
+    /// Column name for sample IDs
     #[arg(long, required = true)]
-    covar_file: PathBuf,
+    sample_id_col: String,
 
-    /// Column name in the phenotype file for sample IDs
-    #[arg(long, required = true)]
-    sample_id_in_pheno: String,
-
-    /// Column name in the covariate file for sample IDs
-    #[arg(long, required = true)]
-    sample_id_in_covar: String,
+    /// Comma-separated list of covariate column names
+    #[arg(long, required = true, value_delimiter = ',')]
+    covariate_cols: Vec<String>,
 
     /// Type of trait ('quantitative', 'binary', or 'count')
     #[arg(long, required = true)]
@@ -97,18 +93,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Found {} samples in .fam file.", master_sample_ids.len());
 
     // ===================================================================
-    // 2. Load Data (Pheno, Covar) and align to .fam samples
+    // 2. Load Data (Pheno + Covar) and align to .fam samples
     // ===================================================================
     log::info!("Loading and aligning phenotype and covariate data...");
     let aligned_data = load_aligned_data(
-        &cli.pheno_file,
-        &cli.covar_file,
+        &cli.pheno_covar_file,
         &cli.trait_name,
-        &cli.sample_id_in_pheno,
-        &cli.sample_id_in_covar,
+        &cli.sample_id_col,
+        &cli.covariate_cols,
         &master_sample_ids,
     )?;
-    log::info!("{} samples aligned between .fam, pheno, and covar.", aligned_data.sample_ids.len());
+    log::info!("{} samples aligned between .fam and data file.", aligned_data.sample_ids.len());
 
     // ===================================================================
     // 3. Build GRM

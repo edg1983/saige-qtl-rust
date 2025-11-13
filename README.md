@@ -8,6 +8,7 @@ A high-performance Rust implementation of SAIGE-QTL for single-cell eQTL analysi
 - **Parallel Association Testing**: Multi-threaded score tests with Saddlepoint Approximation (SPA)
 - **Memory Efficient**: Optimized data structures and lazy evaluation
 - **Type Safe**: Leverages Rust's type system to prevent common errors
+- **Simplified Data Format**: Single file for phenotypes and covariates for faster loading
 
 ## Installation
 
@@ -64,11 +65,10 @@ Fits a null Generalized Linear Mixed Model (GLMM) to estimate variance component
 ```bash
 target/release/step1-fit-null \
   --plink-file data/genotypes \
-  --pheno-file data/phenotypes.tsv \
+  --pheno-covar-file data/phenotypes_and_covariates.tsv \
   --trait-name GENE1 \
-  --covar-file data/covariates.tsv \
-  --sample-id-in-pheno IID \
-  --sample-id-in-covar IID \
+  --sample-id-col IID \
+  --covariate-cols PC1,PC2,PC3,age,sex \
   --trait-type quantitative \
   --output-prefix output/step1 \
   --n-threads 8 \
@@ -79,15 +79,14 @@ target/release/step1-fit-null \
 
 #### Required Arguments
 
-| Argument               | Description                                                    |
-| ---------------------- | -------------------------------------------------------------- |
-| `--plink-file`         | Path to PLINK file prefix (.bed/.bim/.fam) for GRM calculation |
-| `--pheno-file`         | Path to phenotype file (TSV format)                            |
-| `--trait-name`         | Column name in phenotype file for the trait/gene               |
-| `--covar-file`         | Path to covariate file (TSV format)                            |
-| `--sample-id-in-pheno` | Column name for sample IDs in phenotype file                   |
-| `--sample-id-in-covar` | Column name for sample IDs in covariate file                   |
-| `--trait-type`         | Type of trait: `quantitative`, `binary`, or `count`            |
+| Argument             | Description                                                    |
+| -------------------- | -------------------------------------------------------------- |
+| `--plink-file`       | Path to PLINK file prefix (.bed/.bim/.fam) for GRM calculation |
+| `--pheno-covar-file` | Path to file containing both phenotypes and covariates (TSV)   |
+| `--trait-name`       | Column name for the trait/gene to analyze                      |
+| `--sample-id-col`    | Column name for sample IDs                                     |
+| `--covariate-cols`   | Comma-separated list of covariate column names                 |
+| `--trait-type`       | Type of trait: `quantitative`, `binary`, or `count`            |
 
 #### Optional Arguments
 
@@ -125,15 +124,17 @@ target/release/step2-run-tests \
 
 #### Required Arguments
 
-| Argument               | Description                                   |
-| ---------------------- | --------------------------------------------- |
-| `--vcf-file`           | Path to VCF/BCF file with genotypes (indexed) |
-| `--pheno-file`         | Path to phenotype file (for sample alignment) |
-| `--sample-id-in-pheno` | Column name for sample IDs in phenotype file  |
-| `--trait-name`         | Trait/gene name (must match Step 1)           |
-| `--covar-file`         | Path to covariate file (for sample alignment) |
-| `--sample-id-in-covar` | Column name for sample IDs in covariate file  |
-| `--step1-output-file`  | Path to fitted null model from Step 1         |
+| Argument               | Description                                             |
+| ---------------------- | ------------------------------------------------------- |
+| `--vcf-file`           | Path to VCF/BCF file with genotypes (indexed)           |
+| `--pheno-file`         | Path to phenotype/covariate file (for sample alignment) |
+| `--sample-id-in-pheno` | Column name for sample IDs in phenotype file            |
+| `--trait-name`         | Trait/gene name (must match Step 1)                     |
+| `--covar-file`         | Path to covariate file (for sample alignment)           |
+| `--sample-id-in-covar` | Column name for sample IDs in covariate file            |
+| `--step1-output-file`  | Path to fitted null model from Step 1                   |
+
+**Note**: For Step 2, `--pheno-file` and `--covar-file` should point to the same combined file used in Step 1, with the same `--sample-id-in-pheno` and `--sample-id-in-covar` both set to your sample ID column name.
 
 #### Optional Arguments
 
@@ -163,11 +164,10 @@ Generates a tab-delimited gzipped file with columns:
 # Step 1: Fit null model for a gene
 target/release/step1-fit-null \
   --plink-file data/genotypes \
-  --pheno-file data/expression.tsv \
+  --pheno-covar-file data/expression_with_covariates.tsv \
   --trait-name ENSG00000000003 \
-  --covar-file data/covariates.tsv \
-  --sample-id-in-pheno individual_id \
-  --sample-id-in-covar individual_id \
+  --sample-id-col individual_id \
+  --covariate-cols PC1,PC2,PC3,PC4,PC5,age,sex,batch \
   --trait-type quantitative \
   --output-prefix results/null_model \
   --n-threads 16
@@ -176,10 +176,10 @@ target/release/step1-fit-null \
 target/release/step2-run-tests \
   --vcf-file data/chr1.vcf.gz \
   --vcf-field DS \
-  --pheno-file data/expression.tsv \
+  --pheno-file data/expression_with_covariates.tsv \
   --sample-id-in-pheno individual_id \
   --trait-name ENSG00000000003 \
-  --covar-file data/covariates.tsv \
+  --covar-file data/expression_with_covariates.tsv \
   --sample-id-in-covar individual_id \
   --step1-output-file results/null_model.ENSG00000000003.model.bin \
   --region chr1:50000000-51000000 \
@@ -203,11 +203,10 @@ docker run --rm \
   saige-qtl-rust:latest \
   step1-fit-null \
     --plink-file /data/genotypes \
-    --pheno-file /data/expression.tsv \
+    --pheno-covar-file /data/expression_with_covariates.tsv \
     --trait-name ENSG00000000003 \
-    --covar-file /data/covariates.tsv \
-    --sample-id-in-pheno individual_id \
-    --sample-id-in-covar individual_id \
+    --sample-id-col individual_id \
+    --covariate-cols PC1,PC2,PC3,PC4,PC5,age,sex,batch \
     --trait-type quantitative \
     --output-prefix /output/null_model \
     --n-threads 16
@@ -221,10 +220,10 @@ docker run --rm \
   step2-run-tests \
     --vcf-file /data/chr1.vcf.gz \
     --vcf-field DS \
-    --pheno-file /data/expression.tsv \
+    --pheno-file /data/expression_with_covariates.tsv \
     --sample-id-in-pheno individual_id \
     --trait-name ENSG00000000003 \
-    --covar-file /data/covariates.tsv \
+    --covar-file /data/expression_with_covariates.tsv \
     --sample-id-in-covar individual_id \
     --step1-output-file /output/null_model.ENSG00000000003.model.bin \
     --region chr1:50000000-51000000 \
@@ -251,8 +250,13 @@ singularity exec \
   saige-qtl-rust.sif \
   step1-fit-null \
     --plink-file /data/genotypes \
-    --pheno-file /data/expression.tsv \
-    [other options...]
+    --pheno-covar-file /data/expression_with_covariates.tsv \
+    --trait-name ENSG00000000003 \
+    --sample-id-col individual_id \
+    --covariate-cols PC1,PC2,PC3,PC4,PC5,age,sex,batch \
+    --trait-type quantitative \
+    --output-prefix /output/null_model \
+    --n-threads 16
 
 # Run Step 2
 singularity exec \
@@ -261,26 +265,28 @@ singularity exec \
   saige-qtl-rust.sif \
   step2-run-tests \
     --vcf-file /data/chr1.vcf.gz \
+    --pheno-file /data/expression_with_covariates.tsv \
+    --sample-id-in-pheno individual_id \
+    --trait-name ENSG00000000003 \
+    --covar-file /data/expression_with_covariates.tsv \
+    --sample-id-in-covar individual_id \
+    --step1-output-file /output/null_model.ENSG00000000003.model.bin \
+    --region chr1:50000000-51000000 \
+    --output-file /output/ENSG00000000003.associations.txt.gz \
     [other options...]
 ```
 
 ## Input File Formats
 
-### Phenotype File
-Tab-delimited file with header:
+### Phenotype and Covariate File (Combined)
+Tab-delimited file with header containing both phenotypes (gene expression) and covariates:
 ```
-IID    GENE1    GENE2    GENE3
-sample1    0.5      1.2      -0.3
-sample2    1.1      0.8       0.9
+IID         GENE1    GENE2    GENE3    PC1    PC2    AGE    SEX
+sample1     0.5      1.2      -0.3     0.1    -0.5   45     1
+sample2     1.1      0.8       0.9    -0.3     0.2   38     0
 ```
 
-### Covariate File
-Tab-delimited file with header:
-```
-IID    PC1    PC2    AGE    SEX
-sample1    0.1    -0.5    45    1
-sample2    -0.3    0.2    38    0
-```
+**Note**: You specify which column is the phenotype using `--trait-name` and which columns are covariates using `--covariate-cols`. The intercept is automatically added.
 
 ### PLINK Files
 Standard PLINK binary format (.bed/.bim/.fam) for genetic relationship matrix calculation.

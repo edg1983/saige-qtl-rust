@@ -28,125 +28,108 @@ pub struct AlignedData {
     pub sample_ids: Vec<String>,
 }
 
-/// Loads phenotype and covariate files, aligns them to a given
-/// list of master samples (e.g., from a PLINK .fam file).
+/// Loads a single file containing both phenotypes and covariates, then subsets
+/// to samples present in the master sample list (e.g., from a PLINK .fam file).
 pub fn load_aligned_data(
-    pheno_file: &Path,
-    covar_file: &Path,
+    pheno_covar_file: &Path,
     trait_name: &str,
-    sample_id_pheno: &str,
-    sample_id_covar: &str,
+    sample_id_col: &str,
+    covariate_cols: &[String],
     master_sample_ids: &[String],
 ) -> Result<AlignedData, IoError> {
     
-    // Create a DataFrame for master sample IDs to join against
+    // 1. Load the combined phenotype/covariate file
+    let mut data_df = CsvReadOptions::default()
+        .with_has_header(true)
+        .with_parse_options(
+            CsvParseOptions::default()
+                .with_separator(b'\t')
+        )
+        .try_into_reader_with_file_path(Some(pheno_covar_file.into()))?
+        .finish()?;
+    
+    // Cast sample ID column to string to handle both numeric and string IDs
+    let sample_id_series = data_df.column(sample_id_col)?.clone();
+    let sample_id_as_str = sample_id_series.cast(&DataType::String)?;
+    data_df.replace(sample_id_col, sample_id_as_str)?;
+
+    // 2. Create a master samples dataframe and find intersection
     let master_df = DataFrame::new(vec![
         Series::new("MASTER_SAMPLES", master_sample_ids)
     ])?;
-
-    // 1. Load Phenotype
-    // In Polars 0.41.x, CsvReadOptions is used to configure the reader
-    let mut pheno_df = CsvReadOptions::default()
-        .with_has_header(true)
-        .with_parse_options(
-            CsvParseOptions::default()
-                .with_separator(b'\t')
-        )
-        .try_into_reader_with_file_path(Some(pheno_file.into()))?
-        .finish()?;
     
-    // Cast sample ID column to string to handle both numeric and string IDs
-    let pheno_id_col = pheno_df.column(sample_id_pheno)?.clone();
-    let pheno_id_as_str = pheno_id_col.cast(&DataType::String)?;
-    pheno_df.replace(sample_id_pheno, pheno_id_as_str)?;
-
-    // 2. Load Covariates
-    // In Polars 0.41.x, CsvReadOptions is used to configure the reader
-    let mut covar_df = CsvReadOptions::default()
-        .with_has_header(true)
-        .with_parse_options(
-            CsvParseOptions::default()
-                .with_separator(b'\t')
-        )
-        .try_into_reader_with_file_path(Some(covar_file.into()))?
-        .finish()?;
-    
-    // Cast sample ID column to string to handle both numeric and string IDs
-    let covar_id_col = covar_df.column(sample_id_covar)?.clone();
-    let covar_id_as_str = covar_id_col.cast(&DataType::String)?;
-    covar_df.replace(sample_id_covar, covar_id_as_str)?;
-
-    // 3. Get final sample list (those present in all files)
-    let final_samples_df = master_df
+    // Get samples present in both FAM and data file
+    let intersection_df = master_df
         .lazy()
         .join(
-            pheno_df.clone().lazy(),
+            data_df.clone().lazy(),
             [col("MASTER_SAMPLES")],
-            [col(sample_id_pheno)],
-            JoinType::Inner.into(),
-        )
-        .join(
-            covar_df.clone().lazy(),
-            [col("MASTER_SAMPLES")],
-            [col(sample_id_covar)],
+            [col(sample_id_col)],
             JoinType::Inner.into(),
         )
         .select([col("MASTER_SAMPLES")])
         .collect()?;
-
-    let sample_ids: Vec<String> = final_samples_df
+    
+    let sample_ids: Vec<String> = intersection_df
         .column("MASTER_SAMPLES")?
         .str()?
         .into_iter()
         .map(|opt_s| opt_s.map(String::from))
         .collect::<Option<Vec<String>>>()
         .ok_or(IoError::Alignment("Failed to unwrap sample IDs".into()))?;
-
-    // 4. Now filter pheno and covar to only include the final sample intersection
-    let final_samples_series = Series::new("FINAL_SAMPLES", &sample_ids);
-    let final_samples_for_filter = DataFrame::new(vec![final_samples_series])?;
     
-    let filtered_pheno = final_samples_for_filter.clone()
+    if sample_ids.is_empty() {
+        return Err(IoError::Alignment(
+            "No overlapping samples found between FAM file and phenotype/covariate file".into()
+        ));
+    }
+
+    // 3. Filter data to only include samples in FAM file, maintaining FAM order
+    let sample_series = Series::new("FILTER_SAMPLES", &sample_ids);
+    let filter_df = DataFrame::new(vec![sample_series])?;
+    
+    let filtered_data = filter_df
         .lazy()
         .join(
-            pheno_df.clone().lazy(),
-            [col("FINAL_SAMPLES")],
-            [col(sample_id_pheno)],
+            data_df.lazy(),
+            [col("FILTER_SAMPLES")],
+            [col(sample_id_col)],
             JoinType::Inner.into(),
         )
-        .drop(["FINAL_SAMPLES"])
-        .collect()?;
-    
-    let filtered_covar = final_samples_for_filter
-        .lazy()
-        .join(
-            covar_df.clone().lazy(),
-            [col("FINAL_SAMPLES")],
-            [col(sample_id_covar)],
-            JoinType::Inner.into(),
-        )
-        .drop(["FINAL_SAMPLES"])
+        .drop(["FILTER_SAMPLES"])
         .collect()?;
 
-    // 5. Convert to ndarray
-    let y_vec: Vec<f64> = filtered_pheno
+    // 4. Extract phenotype column
+    let y_vec: Vec<f64> = filtered_data
         .column(trait_name)?
         .f64()?
         .into_iter()
         .collect::<Option<Vec<f64>>>()
-        .ok_or(IoError::Alignment("Phenotype column contains nulls".into()))?;
+        .ok_or(IoError::Alignment(format!("Phenotype column '{}' contains nulls", trait_name)))?;
     let y: Array1<f64> = Array1::from_vec(y_vec);
 
+    // 5. Extract covariate columns and create design matrix with intercept
     let n_samples = sample_ids.len();
-    let n_covars = filtered_covar.width();
+    let n_covars = covariate_cols.len();
     
-    // Add an intercept term
-    let intercept = Array1::ones(n_samples);
     let mut x = Array2::zeros((n_samples, n_covars + 1));
-    x.column_mut(0).assign(&intercept);
     
-    let covar_matrix_no_intercept = filtered_covar.to_ndarray::<Float64Type>(IndexOrder::Fortran)?;
-    x.slice_mut(s![.., 1..]).assign(&covar_matrix_no_intercept);
+    // Add intercept as first column
+    x.column_mut(0).fill(1.0);
+    
+    // Add each covariate column
+    for (i, covar_name) in covariate_cols.iter().enumerate() {
+        let covar_vec: Vec<f64> = filtered_data
+            .column(covar_name)?
+            .f64()?
+            .into_iter()
+            .collect::<Option<Vec<f64>>>()
+            .ok_or(IoError::Alignment(format!("Covariate column '{}' contains nulls", covar_name)))?;
+        
+        for (j, &val) in covar_vec.iter().enumerate() {
+            x[[j, i + 1]] = val;
+        }
+    }
 
     if y.len() != n_samples || x.nrows() != n_samples {
         // CORRECTED: Use `IoError::Alignment`
