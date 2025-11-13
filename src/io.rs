@@ -93,30 +93,42 @@ pub fn load_aligned_data(
     log::info!("Found {} overlapping samples", sample_ids.len());
 
     // 3. Filter data to only include samples in FAM file, maintaining FAM order
-    let sample_series = Series::new("FILTER_SAMPLES", &sample_ids);
-    let filter_df = DataFrame::new(vec![sample_series])?;
+    // We need to select rows from data_df that match our sample_ids list, in order
+    let sample_series = Series::new("FAM_SAMPLES", &sample_ids);
+    let fam_order_df = DataFrame::new(vec![sample_series])?;
     
-    let filtered_data = filter_df
+    // Join to get data in FAM order, using left join to preserve order
+    let filtered_data = fam_order_df
         .lazy()
         .join(
             data_df.lazy(),
-            [col("FILTER_SAMPLES")],
+            [col("FAM_SAMPLES")],
             [col(sample_id_col)],
-            JoinType::Inner.into(),
+            JoinType::Left.into(),
         )
-        .drop(["FILTER_SAMPLES"])
         .collect()?;
     
-    log::info!("Filtered data to {} samples", filtered_data.height());
+    log::info!("Filtered data to {} samples (expected {})", filtered_data.height(), sample_ids.len());
+    
+    // Verify we got the right number of samples
+    if filtered_data.height() != sample_ids.len() {
+        return Err(IoError::Alignment(format!(
+            "After filtering, got {} rows but expected {} samples. Check for duplicate sample IDs in your data file.",
+            filtered_data.height(), sample_ids.len()
+        )));
+    }
 
     // 4. Extract phenotype column
     log::info!("Extracting phenotype column '{}'", trait_name);
+    
+    // The joined dataframe will have both FAM_SAMPLES and the original sample_id_col
+    // We'll use the phenotype from the joined data
     let y_vec: Vec<f64> = filtered_data
         .column(trait_name)?
         .f64()?
         .into_iter()
         .collect::<Option<Vec<f64>>>()
-        .ok_or(IoError::Alignment(format!("Phenotype column '{}' contains nulls", trait_name)))?;
+        .ok_or(IoError::Alignment(format!("Phenotype column '{}' contains nulls or missing values", trait_name)))?;
     let y: Array1<f64> = Array1::from_vec(y_vec);
     
     log::info!("Phenotype vector has {} values", y.len());
