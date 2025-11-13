@@ -163,17 +163,20 @@ pub fn get_fam_samples(plink_file_no_ext: &Path) -> Result<Vec<String>, IoError>
     }
     
     // In Polars 0.41.x, CsvReadOptions is used to configure the reader
+    // .fam files have 6 columns: FID IID PID MID SEX PHENO
     let fam_df = CsvReadOptions::default()
         .with_has_header(false)
         .with_parse_options(
             CsvParseOptions::default()
-                .with_separator(b' ')
+                .with_separator(b'\t')
         )
         .try_into_reader_with_file_path(Some(fam_path.clone().into()))?
         .finish()?;
 
+    // Get the second column (IID) - when there's no header, columns are named column_1, column_2, etc.
     let sample_ids: Vec<String> = fam_df
-        .column("column_2")? // IID is the 2nd column
+        .get_column_index(1) // Get column by index (0-based)
+        .ok_or(IoError::Alignment("FAM file does not have enough columns".into()))?
         .str()?
         .into_iter()
         .map(|opt_s| opt_s.map(String::from))
