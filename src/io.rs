@@ -1,8 +1,7 @@
 //! Module for handling I/O, data loading, and sample alignment.
-// ADDED: Import IndexOrder
-use polars::prelude::{IndexOrder, *};
+use polars::prelude::*;
 use std::path::Path;
-use ndarray::{Array1, Array2, s}; // <-- Added 's' macro import
+use ndarray::{Array1, Array2};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -64,15 +63,16 @@ pub fn load_aligned_data(
         Series::new("MASTER_SAMPLES", master_sample_ids)
     ])?;
     
-    // Semi-join: keep only rows from data_df where sample_id is in master_df
+    // Inner join: keep only rows from data_df where sample_id is in master_df
     let filtered_data = data_df
         .lazy()
         .join(
             master_df.lazy(),
             [col(sample_id_col)],
             [col("MASTER_SAMPLES")],
-            JoinType::Semi.into(),
+            JoinType::Inner.into(),
         )
+        .drop(["MASTER_SAMPLES"])
         .collect()?;
     
     log::info!("After filtering: {} rows remaining", filtered_data.height());
