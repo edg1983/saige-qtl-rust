@@ -173,15 +173,13 @@ pub fn get_fam_samples(plink_file_no_ext: &Path) -> Result<Vec<String>, IoError>
         .try_into_reader_with_file_path(Some(fam_path.clone().into()))?
         .finish()?;
 
-    // Get the second column (IID) - when there's no header, columns are named column_1, column_2, etc.
+    // Get the second column (IID) by index - use select to get column by position
     let sample_ids: Vec<String> = fam_df
-        .get_column_index(1) // Get column by index (0-based)
-        .ok_or(IoError::Alignment("FAM file does not have enough columns".into()))?
+        .get_columns()[1] // Get the second column (0-indexed)
         .str()?
         .into_iter()
         .map(|opt_s| opt_s.map(String::from))
         .collect::<Option<Vec<String>>>()
-        // CORRECTED: Use `IoError::Alignment`
         .ok_or(IoError::Alignment("Failed to parse .fam sample IDs".into()))?;
 
     Ok(sample_ids)
