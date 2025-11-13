@@ -64,7 +64,8 @@ pub fn load_aligned_data(
     ])?;
     
     // Inner join: keep only rows from data_df where sample_id is in master_df
-    let filtered_data = data_df
+    // This will keep all rows from data_df that have a matching sample ID in master_df
+    let joined_data = data_df
         .lazy()
         .join(
             master_df.lazy(),
@@ -72,8 +73,14 @@ pub fn load_aligned_data(
             [col("MASTER_SAMPLES")],
             JoinType::Inner.into(),
         )
-        .drop(["MASTER_SAMPLES"])
         .collect()?;
+    
+    // Drop the MASTER_SAMPLES column if it exists
+    let filtered_data = if joined_data.get_column_names().contains(&"MASTER_SAMPLES") {
+        joined_data.drop("MASTER_SAMPLES")?
+    } else {
+        joined_data
+    };
     
     log::info!("After filtering: {} rows remaining", filtered_data.height());
 
