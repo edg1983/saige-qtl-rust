@@ -38,6 +38,8 @@ pub fn load_aligned_data(
     master_sample_ids: &[String],
 ) -> Result<AlignedData, IoError> {
     
+    log::info!("Loading phenotype/covariate file: {:?}", pheno_covar_file);
+    
     // 1. Load the combined phenotype/covariate file
     let mut data_df = CsvReadOptions::default()
         .with_has_header(true)
@@ -48,12 +50,16 @@ pub fn load_aligned_data(
         .try_into_reader_with_file_path(Some(pheno_covar_file.into()))?
         .finish()?;
     
+    log::info!("Loaded data file with {} rows and {} columns", data_df.height(), data_df.width());
+    
     // Cast sample ID column to string to handle both numeric and string IDs
     let sample_id_series = data_df.column(sample_id_col)?.clone();
     let sample_id_as_str = sample_id_series.cast(&DataType::String)?;
     data_df.replace(sample_id_col, sample_id_as_str)?;
 
     // 2. Create a master samples dataframe and find intersection
+    log::info!("Finding intersection between {} FAM samples and data file samples", master_sample_ids.len());
+    
     let master_df = DataFrame::new(vec![
         Series::new("MASTER_SAMPLES", master_sample_ids)
     ])?;
@@ -83,6 +89,8 @@ pub fn load_aligned_data(
             "No overlapping samples found between FAM file and phenotype/covariate file".into()
         ));
     }
+    
+    log::info!("Found {} overlapping samples", sample_ids.len());
 
     // 3. Filter data to only include samples in FAM file, maintaining FAM order
     let sample_series = Series::new("FILTER_SAMPLES", &sample_ids);
@@ -98,8 +106,11 @@ pub fn load_aligned_data(
         )
         .drop(["FILTER_SAMPLES"])
         .collect()?;
+    
+    log::info!("Filtered data to {} samples", filtered_data.height());
 
     // 4. Extract phenotype column
+    log::info!("Extracting phenotype column '{}'", trait_name);
     let y_vec: Vec<f64> = filtered_data
         .column(trait_name)?
         .f64()?
@@ -107,10 +118,14 @@ pub fn load_aligned_data(
         .collect::<Option<Vec<f64>>>()
         .ok_or(IoError::Alignment(format!("Phenotype column '{}' contains nulls", trait_name)))?;
     let y: Array1<f64> = Array1::from_vec(y_vec);
+    
+    log::info!("Phenotype vector has {} values", y.len());
 
     // 5. Extract covariate columns and create design matrix with intercept
     let n_samples = sample_ids.len();
     let n_covars = covariate_cols.len();
+    
+    log::info!("Building design matrix: {} samples x {} covariates (+ intercept)", n_samples, n_covars);
     
     let mut x = Array2::zeros((n_samples, n_covars + 1));
     
@@ -119,6 +134,8 @@ pub fn load_aligned_data(
     
     // Add each covariate column
     for (i, covar_name) in covariate_cols.iter().enumerate() {
+        log::debug!("Extracting covariate column '{}' (column {})", covar_name, i + 1);
+        
         let covar_vec: Vec<f64> = filtered_data
             .column(covar_name)?
             .f64()?
@@ -126,18 +143,28 @@ pub fn load_aligned_data(
             .collect::<Option<Vec<f64>>>()
             .ok_or(IoError::Alignment(format!("Covariate column '{}' contains nulls", covar_name)))?;
         
+        if covar_vec.len() != n_samples {
+            return Err(IoError::Alignment(format!(
+                "Covariate '{}' has {} values but expected {} samples",
+                covar_name, covar_vec.len(), n_samples
+            )));
+        }
+        
         for (j, &val) in covar_vec.iter().enumerate() {
             x[[j, i + 1]] = val;
         }
     }
+    
+    log::info!("Design matrix created: shape [{}, {}]", x.nrows(), x.ncols());
 
     if y.len() != n_samples || x.nrows() != n_samples {
-        // CORRECTED: Use `IoError::Alignment`
         return Err(IoError::Alignment(format!(
             "Dimension mismatch after alignment: y ({}), X ({}), samples ({})",
             y.len(), x.nrows(), n_samples
         )));
     }
+    
+    log::info!("Data alignment completed successfully: {} samples with {} covariates", n_samples, n_covars);
 
     Ok(AlignedData { y, x, sample_ids })
 }
