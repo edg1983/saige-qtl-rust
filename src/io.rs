@@ -56,69 +56,28 @@ pub fn load_aligned_data(
     let sample_id_series = data_df.column(sample_id_col)?.clone();
     let sample_id_as_str = sample_id_series.cast(&DataType::String)?;
     data_df.replace(sample_id_col, sample_id_as_str)?;
-
-    // 2. Create a master samples dataframe and find intersection
-    log::info!("Finding intersection between {} FAM samples and data file samples", master_sample_ids.len());
+    
+    // 2. Filter to only rows where sample ID is in the FAM file
+    log::info!("Filtering to samples present in {} FAM samples", master_sample_ids.len());
     
     let master_df = DataFrame::new(vec![
         Series::new("MASTER_SAMPLES", master_sample_ids)
     ])?;
     
-    // Get samples present in both FAM and data file
-    let intersection_df = master_df
+    // Semi-join: keep only rows from data_df where sample_id is in master_df
+    let filtered_data = data_df
         .lazy()
         .join(
-            data_df.clone().lazy(),
+            master_df.lazy(),
+            [col(sample_id_col)],
             [col("MASTER_SAMPLES")],
-            [col(sample_id_col)],
-            JoinType::Inner.into(),
-        )
-        .select([col("MASTER_SAMPLES")])
-        .collect()?;
-    
-    let sample_ids: Vec<String> = intersection_df
-        .column("MASTER_SAMPLES")?
-        .str()?
-        .into_iter()
-        .map(|opt_s| opt_s.map(String::from))
-        .collect::<Option<Vec<String>>>()
-        .ok_or(IoError::Alignment("Failed to unwrap sample IDs".into()))?;
-    
-    if sample_ids.is_empty() {
-        return Err(IoError::Alignment(
-            "No overlapping samples found between FAM file and phenotype/covariate file".into()
-        ));
-    }
-    
-    log::info!("Found {} overlapping samples", sample_ids.len());
-
-    // 3. Filter data to only include samples in FAM file, maintaining FAM order
-    // We need to select rows from data_df that match our sample_ids list, in order
-    let sample_series = Series::new("FAM_SAMPLES", &sample_ids);
-    let fam_order_df = DataFrame::new(vec![sample_series])?;
-    
-    // Join to get data in FAM order, using left join to preserve order
-    let filtered_data = fam_order_df
-        .lazy()
-        .join(
-            data_df.lazy(),
-            [col("FAM_SAMPLES")],
-            [col(sample_id_col)],
-            JoinType::Left.into(),
+            JoinType::Semi.into(),
         )
         .collect()?;
     
-    log::info!("Filtered data to {} samples (expected {})", filtered_data.height(), sample_ids.len());
-    
-    // Verify we got the right number of samples
-    if filtered_data.height() != sample_ids.len() {
-        return Err(IoError::Alignment(format!(
-            "After filtering, got {} rows but expected {} samples. Check for duplicate sample IDs in your data file.",
-            filtered_data.height(), sample_ids.len()
-        )));
-    }
+    log::info!("After filtering: {} rows remaining", filtered_data.height());
 
-    // 4. Extract phenotype column
+    // 3. Extract phenotype column
     log::info!("Extracting phenotype column '{}'", trait_name);
     
     // The joined dataframe will have both FAM_SAMPLES and the original sample_id_col
@@ -133,11 +92,20 @@ pub fn load_aligned_data(
     
     log::info!("Phenotype vector has {} values", y.len());
 
+    // 4. Extract sample IDs from filtered data
+    let sample_ids: Vec<String> = filtered_data
+        .column(sample_id_col)?
+        .str()?
+        .into_iter()
+        .map(|opt_s| opt_s.map(String::from))
+        .collect::<Option<Vec<String>>>()
+        .ok_or(IoError::Alignment("Failed to extract sample IDs from filtered data".into()))?;
+
     // 5. Extract covariate columns and create design matrix with intercept
-    let n_samples = sample_ids.len();
+    let n_samples = filtered_data.height();
     let n_covars = covariate_cols.len();
     
-    log::info!("Building design matrix: {} samples x {} covariates (+ intercept)", n_samples, n_covars);
+    log::info!("Building design matrix: {} rows x {} covariates (+ intercept)", n_samples, n_covars);
     
     let mut x = Array2::zeros((n_samples, n_covars + 1));
     
