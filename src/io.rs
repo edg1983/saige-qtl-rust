@@ -126,33 +126,53 @@ pub fn load_aligned_data(
         .into_iter()
         .map(|opt_s| opt_s.map(String::from))
         .collect::<Option<Vec<String>>>()
-        // CORRECTED: Use `ok_or` for `Option`
         .ok_or(IoError::Alignment("Failed to unwrap sample IDs".into()))?;
 
-    // 5. Convert to ndarray
-    // CORRECTED: `to_ndarray` is gone. We must collect into a Vec first.
-    let y_vec: Vec<f64> = aligned_pheno
+    // 5. Filter aligned data to only include samples in the intersection
+    let final_samples_series = Series::new("MASTER_SAMPLES", &sample_ids);
+    let final_samples_for_filter = DataFrame::new(vec![final_samples_series])?;
+    
+    let filtered_pheno = final_samples_for_filter.clone()
+        .lazy()
+        .join(
+            aligned_pheno.lazy(),
+            [col("MASTER_SAMPLES")],
+            [col(sample_id_pheno)],
+            JoinType::Inner.into(),
+        )
+        .drop(["MASTER_SAMPLES"])
+        .collect()?;
+    
+    let filtered_covar = final_samples_for_filter
+        .lazy()
+        .join(
+            aligned_covar.lazy(),
+            [col("MASTER_SAMPLES")],
+            [col(sample_id_covar)],
+            JoinType::Inner.into(),
+        )
+        .drop(["MASTER_SAMPLES"])
+        .collect()?;
+
+    // 6. Convert to ndarray
+    let y_vec: Vec<f64> = filtered_pheno
         .column(trait_name)?
         .f64()?
         .into_iter()
         .collect::<Option<Vec<f64>>>()
-        // CORRECTED: `map_err` is not for `Option`. Use `ok_or`.
         .ok_or(IoError::Alignment("Phenotype column contains nulls".into()))?;
     let y: Array1<f64> = Array1::from_vec(y_vec);
 
     let n_samples = sample_ids.len();
-    // CORRECTED: `aligned_covar` is now in scope
-    let n_covars = aligned_covar.width();
+    let n_covars = filtered_covar.width();
     
     // Add an intercept term
     let intercept = Array1::ones(n_samples);
     let mut x = Array2::zeros((n_samples, n_covars + 1));
     x.column_mut(0).assign(&intercept);
     
-    // CORRECTED: `aligned_covar` is now in scope
-    // FIXED: `IndexOrder::F` is now `IndexOrder::Fortran`.
-    let covar_matrix_no_intercept = aligned_covar.to_ndarray::<Float64Type>(IndexOrder::Fortran)?;
-    x.slice_mut(s![.., 1..]).assign(&covar_matrix_no_intercept); // This line now works
+    let covar_matrix_no_intercept = filtered_covar.to_ndarray::<Float64Type>(IndexOrder::Fortran)?;
+    x.slice_mut(s![.., 1..]).assign(&covar_matrix_no_intercept);
 
     if y.len() != n_samples || x.nrows() != n_samples {
         // CORRECTED: Use `IoError::Alignment`
