@@ -76,9 +76,8 @@ pub fn load_aligned_data(
     let covar_id_as_str = covar_id_col.cast(&DataType::String)?;
     covar_df.replace(sample_id_covar, covar_id_as_str)?;
 
-    // 3. Align pheno and covar to master list
-    // This join ensures we are in the correct order and subset
-    let aligned_pheno = master_df.clone()
+    // 3. Get final sample list (those present in all files)
+    let final_samples_df = master_df
         .lazy()
         .join(
             pheno_df.clone().lazy(),
@@ -86,33 +85,8 @@ pub fn load_aligned_data(
             [col(sample_id_pheno)],
             JoinType::Inner.into(),
         )
-        // CORRECTED: `drop_columns` is now `drop`
-        .drop(["MASTER_SAMPLES"])
-        .collect()?;
-
-    // CORRECTED: Re-added the missing definition for `aligned_covar`
-    let aligned_covar = master_df.clone()
-        .lazy()
         .join(
             covar_df.clone().lazy(),
-            [col("MASTER_SAMPLES")],
-            [col(sample_id_covar)],
-            JoinType::Inner.into(),
-        )
-        .drop(["MASTER_SAMPLES"])
-        .collect()?;
-
-    // 4. Get final sample list (those present in all files)
-    let final_samples_df = master_df
-        .lazy()
-        .join(
-            pheno_df.lazy(),
-            [col("MASTER_SAMPLES")],
-            [col(sample_id_pheno)],
-            JoinType::Inner.into(),
-        )
-        .join(
-            covar_df.lazy(),
             [col("MASTER_SAMPLES")],
             [col(sample_id_covar)],
             JoinType::Inner.into(),
@@ -128,33 +102,33 @@ pub fn load_aligned_data(
         .collect::<Option<Vec<String>>>()
         .ok_or(IoError::Alignment("Failed to unwrap sample IDs".into()))?;
 
-    // 5. Filter aligned data to only include samples in the intersection
-    let final_samples_series = Series::new("MASTER_SAMPLES", &sample_ids);
+    // 4. Now filter pheno and covar to only include the final sample intersection
+    let final_samples_series = Series::new("FINAL_SAMPLES", &sample_ids);
     let final_samples_for_filter = DataFrame::new(vec![final_samples_series])?;
     
     let filtered_pheno = final_samples_for_filter.clone()
         .lazy()
         .join(
-            aligned_pheno.lazy(),
-            [col("MASTER_SAMPLES")],
+            pheno_df.clone().lazy(),
+            [col("FINAL_SAMPLES")],
             [col(sample_id_pheno)],
             JoinType::Inner.into(),
         )
-        .drop(["MASTER_SAMPLES"])
+        .drop(["FINAL_SAMPLES"])
         .collect()?;
     
     let filtered_covar = final_samples_for_filter
         .lazy()
         .join(
-            aligned_covar.lazy(),
-            [col("MASTER_SAMPLES")],
+            covar_df.clone().lazy(),
+            [col("FINAL_SAMPLES")],
             [col(sample_id_covar)],
             JoinType::Inner.into(),
         )
-        .drop(["MASTER_SAMPLES"])
+        .drop(["FINAL_SAMPLES"])
         .collect()?;
 
-    // 6. Convert to ndarray
+    // 5. Convert to ndarray
     let y_vec: Vec<f64> = filtered_pheno
         .column(trait_name)?
         .f64()?
