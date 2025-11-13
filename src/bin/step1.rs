@@ -9,8 +9,8 @@
 
 use clap::Parser;
 use saige_qtl_rust::{
-    io::{get_fam_samples, load_aligned_data},
-    grm::{build_grm_from_plink, load_grm_from_file},
+    io::{get_fam_samples, get_unique_sample_ids, load_aligned_data},
+    grm::{build_grm_from_plink, load_grm_from_file, subset_grm},
     null_model::fit_null_glmm,
     TraitType
 };
@@ -24,11 +24,12 @@ use std::path::PathBuf;
 )]
 struct Cli {
     /// Path to the PLINK file prefix (.bed/.bim/.fam) for sample list
-    #[arg(long, required = true)]
-    plink_file: PathBuf,
+    /// Required only if --grm-file is not provided
+    #[arg(long)]
+    plink_file: Option<PathBuf>,
 
     /// Path to pre-computed GRM file (use compute-grm to generate this)
-    /// If not provided, GRM will be computed from PLINK files (slower)
+    /// If provided, --plink-file is not required
     #[arg(long)]
     grm_file: Option<PathBuf>,
 
@@ -85,20 +86,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Trait type: {:?}", cli.trait_type);
     log::info!("Using {} threads", cli.n_threads);
 
+    // Validate arguments
+    if cli.grm_file.is_none() && cli.plink_file.is_none() {
+        return Err("Either --grm-file or --plink-file must be provided".into());
+    }
+
     // Set the global thread pool for rayon
     rayon::ThreadPoolBuilder::new()
         .num_threads(cli.n_threads)
         .build_global()?;
 
     // ===================================================================
-    // 1. Get sample list from PLINK .fam file
+    // 1. Determine master sample list
     // ===================================================================
-    log::info!("Reading sample list from .fam file...");
-    let master_sample_ids = get_fam_samples(&cli.plink_file)?;
-    log::info!("Found {} samples in .fam file.", master_sample_ids.len());
+    let master_sample_ids = if let Some(grm_file) = &cli.grm_file {
+        // Using pre-computed GRM: get unique samples from phenotype file
+        log::info!("Using pre-computed GRM mode");
+        log::info!("Getting unique sample IDs from phenotype/covariate file...");
+        get_unique_sample_ids(&cli.pheno_covar_file, &cli.sample_id_col)?
+    } else if let Some(plink_file) = &cli.plink_file {
+        // Computing GRM from PLINK: use FAM file as master list
+        log::info!("Using PLINK mode (computing GRM on-the-fly)");
+        log::info!("Reading sample list from .fam file...");
+        let fam_samples = get_fam_samples(plink_file)?;
+        log::info!("Found {} samples in .fam file.", fam_samples.len());
+        fam_samples
+    } else {
+        unreachable!()
+    };
+
+    log::info!("Master sample list: {} samples", master_sample_ids.len());
 
     // ===================================================================
-    // 2. Load Data (Pheno + Covar) and align to .fam samples
+    // 2. Load Data (Pheno + Covar) and align to master samples
     // ===================================================================
     log::info!("Loading and aligning phenotype and covariate data...");
     let aligned_data = load_aligned_data(
@@ -108,31 +128,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &cli.covariate_cols,
         &master_sample_ids,
     )?;
-    log::info!("{} samples aligned between .fam and data file.", aligned_data.sample_ids.len());
+    log::info!("{} rows in aligned data.", aligned_data.sample_ids.len());
 
     // ===================================================================
-    // 3. Load or Build GRM
+    // 3. Load or Build GRM, then subset/align
     // ===================================================================
     let grm = if let Some(grm_file) = &cli.grm_file {
         // Load pre-computed GRM
         log::info!("Loading pre-computed GRM from {:?}", grm_file);
-        load_grm_from_file(grm_file)?
-    } else {
+        let grm_data = load_grm_from_file(grm_file)?;
+        
+        // Subset GRM to match unique samples from phenotype file
+        log::info!("Subsetting GRM to {} unique samples", master_sample_ids.len());
+        subset_grm(&grm_data, &master_sample_ids)?
+    } else if let Some(plink_file) = &cli.plink_file {
         // Compute GRM from PLINK files
-        log::info!("Computing GRM from PLINK file: {:?}", cli.plink_file);
+        log::info!("Computing GRM from PLINK file: {:?}", plink_file);
         log::warn!("Computing GRM on-the-fly. For better performance, pre-compute with 'compute-grm' and use --grm-file");
-        build_grm_from_plink(&cli.plink_file, cli.n_threads)?
+        build_grm_from_plink(plink_file, cli.n_threads)?
+    } else {
+        unreachable!()
     };
     
     log::info!("GRM ready: {} x {} matrix", grm.nrows(), grm.ncols());
-    
-    // Verify GRM dimensions match FAM samples
-    if grm.nrows() != master_sample_ids.len() {
-        return Err(format!(
-            "GRM dimension mismatch: GRM is {} x {} but FAM file has {} samples",
-            grm.nrows(), grm.ncols(), master_sample_ids.len()
-        ).into());
-    }
 
     // ===================================================================
     // 4. Fit Null GLMM

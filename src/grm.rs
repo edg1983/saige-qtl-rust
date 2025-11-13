@@ -1,22 +1,100 @@
 //! Module for calculating the Genetic Relationship Matrix (GRM)
 use bed_reader::Bed;
-use ndarray::{Array2, Axis}; // Removed unused 's'
+use ndarray::{Array2, Axis};
 use rayon::prelude::*;
 use std::path::Path;
 use std::fs::File;
 use std::io::BufReader;
+use serde::{Serialize, Deserialize};
+
+/// Structure to hold GRM along with sample IDs
+#[derive(Serialize, Deserialize)]
+pub struct GrmData {
+    /// The genetic relationship matrix
+    pub grm: Array2<f64>,
+    /// Sample IDs in the order corresponding to GRM rows/columns
+    pub sample_ids: Vec<String>,
+}
 
 /// Loads a pre-computed GRM from a binary file
-pub fn load_grm_from_file(grm_file: &Path) -> Result<Array2<f64>, Box<dyn std::error::Error>> {
+pub fn load_grm_from_file(grm_file: &Path) -> Result<GrmData, Box<dyn std::error::Error>> {
     log::info!("Loading pre-computed GRM from {:?}", grm_file);
     
     let file = File::open(grm_file)?;
     let reader = BufReader::new(file);
-    let grm: Array2<f64> = bincode::deserialize_from(reader)?;
+    let grm_data: GrmData = bincode::deserialize_from(reader)?;
     
-    log::info!("GRM loaded: {} x {} matrix", grm.nrows(), grm.ncols());
+    log::info!("GRM loaded: {} x {} matrix with {} sample IDs", 
+        grm_data.grm.nrows(), grm_data.grm.ncols(), grm_data.sample_ids.len());
     
-    Ok(grm)
+    Ok(grm_data)
+}
+
+/// Saves GRM and sample IDs to a binary file
+pub fn save_grm_to_file(
+    grm_file: &Path, 
+    grm: &Array2<f64>, 
+    sample_ids: &[String]
+) -> Result<(), Box<dyn std::error::Error>> {
+    log::info!("Saving GRM to {:?}", grm_file);
+    
+    let grm_data = GrmData {
+        grm: grm.clone(),
+        sample_ids: sample_ids.to_vec(),
+    };
+    
+    let file = File::create(grm_file)?;
+    let writer = std::io::BufWriter::new(file);
+    bincode::serialize_into(writer, &grm_data)?;
+    
+    log::info!("GRM saved successfully");
+    
+    Ok(())
+}
+
+/// Subsets and reorders a GRM to match a specific list of sample IDs
+pub fn subset_grm(
+    grm_data: &GrmData,
+    target_sample_ids: &[String],
+) -> Result<Array2<f64>, Box<dyn std::error::Error>> {
+    log::info!("Subsetting GRM from {} to {} samples", 
+        grm_data.sample_ids.len(), target_sample_ids.len());
+    
+    // Create a mapping from sample ID to index in the original GRM
+    let sample_to_idx: std::collections::HashMap<&str, usize> = grm_data
+        .sample_ids
+        .iter()
+        .enumerate()
+        .map(|(idx, id)| (id.as_str(), idx))
+        .collect();
+    
+    // Find indices for target samples
+    let mut indices = Vec::with_capacity(target_sample_ids.len());
+    for target_id in target_sample_ids {
+        match sample_to_idx.get(target_id.as_str()) {
+            Some(&idx) => indices.push(idx),
+            None => {
+                return Err(format!(
+                    "Sample '{}' not found in GRM. GRM contains {} samples.",
+                    target_id, grm_data.sample_ids.len()
+                ).into());
+            }
+        }
+    }
+    
+    // Subset the GRM matrix
+    let n = indices.len();
+    let mut subset_grm = Array2::zeros((n, n));
+    
+    for (i, &idx_i) in indices.iter().enumerate() {
+        for (j, &idx_j) in indices.iter().enumerate() {
+            subset_grm[[i, j]] = grm_data.grm[[idx_i, idx_j]];
+        }
+    }
+    
+    log::info!("GRM subset complete: {} x {} matrix", subset_grm.nrows(), subset_grm.ncols());
+    
+    Ok(subset_grm)
 }
 
 /// Calculates the GRM (A = XX^T / M) from a PLINK .bed file.

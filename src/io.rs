@@ -188,3 +188,39 @@ pub fn get_fam_samples(plink_file_no_ext: &Path) -> Result<Vec<String>, IoError>
 
     Ok(sample_ids)
 }
+
+/// Gets unique sample IDs from a phenotype/covariate file
+pub fn get_unique_sample_ids(
+    pheno_covar_file: &Path,
+    sample_id_col: &str,
+) -> Result<Vec<String>, IoError> {
+    log::info!("Extracting unique sample IDs from {:?}", pheno_covar_file);
+    
+    let mut data_df = CsvReadOptions::default()
+        .with_has_header(true)
+        .with_parse_options(
+            CsvParseOptions::default()
+                .with_separator(b'\t')
+        )
+        .try_into_reader_with_file_path(Some(pheno_covar_file.into()))?
+        .finish()?;
+    
+    // Cast sample ID column to string
+    let sample_id_series = data_df.column(sample_id_col)?.clone();
+    let sample_id_as_str = sample_id_series.cast(&DataType::String)?;
+    data_df.replace(sample_id_col, sample_id_as_str)?;
+    
+    // Get unique sample IDs
+    let unique_ids = data_df
+        .column(sample_id_col)?
+        .str()?
+        .unique()?
+        .into_iter()
+        .map(|opt_s| opt_s.map(String::from))
+        .collect::<Option<Vec<String>>>()
+        .ok_or(IoError::Alignment("Failed to extract unique sample IDs".into()))?;
+    
+    log::info!("Found {} unique samples in data file", unique_ids.len());
+    
+    Ok(unique_ids)
+}

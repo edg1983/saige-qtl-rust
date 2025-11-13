@@ -85,13 +85,33 @@ target/release/compute-grm \
 
 Fits a null Generalized Linear Mixed Model (GLMM) to estimate variance components and fixed effects.
 
+**With pre-computed GRM (recommended):**
+
 ```bash
 target/release/step1-fit-null \
-  --plink-file data/genotypes \
   --grm-file data/genotypes.grm.bin \
   --pheno-covar-file data/phenotypes_and_covariates.tsv \
   --trait-name GENE1 \
   --sample-id-col IID \
+  --covariate-cols PC1,PC2,PC3,age,sex \
+  --trait-type quantitative \
+  --output-prefix output/step1 \
+  --n-threads 8
+```
+
+**Without pre-computed GRM (slower):**
+
+```bash
+target/release/step1-fit-null \
+  --plink-file data/genotypes \
+  --pheno-covar-file data/phenotypes_and_covariates.tsv \
+  --trait-name GENE1 \
+  --sample-id-col IID \
+  --covariate-cols PC1,PC2,PC3,age,sex \
+  --trait-type quantitative \
+  --output-prefix output/step1 \
+  --n-threads 8
+```
   --covariate-cols PC1,PC2,PC3,age,sex \
   --trait-type quantitative \
   --output-prefix output/step1 \
@@ -105,15 +125,15 @@ target/release/step1-fit-null \
 
 | Argument             | Description                                                  |
 | -------------------- | ------------------------------------------------------------ |
-| `--plink-file`       | Path to PLINK file prefix (.bed/.bim/.fam) for sample list   |
-| `--grm-file`         | Path to pre-computed GRM file (optional, see compute-grm)    |
 | `--pheno-covar-file` | Path to file containing both phenotypes and covariates (TSV) |
 | `--trait-name`       | Column name for the trait/gene to analyze                    |
 | `--sample-id-col`    | Column name for sample IDs                                   |
 | `--covariate-cols`   | Comma-separated list of covariate column names               |
 | `--trait-type`       | Type of trait: `quantitative`, `binary`, or `count`          |
 
-**Note**: If `--grm-file` is not provided, the GRM will be computed on-the-fly from the PLINK files (slower).
+**Note**: Either `--grm-file` OR `--plink-file` must be provided:
+- `--grm-file`: Path to pre-computed GRM (faster, recommended for multiple traits)
+- `--plink-file`: Path to PLINK files (will compute GRM on-the-fly, slower)
 
 #### Optional Arguments
 
@@ -194,9 +214,8 @@ target/release/compute-grm \
   --output-file data/genotypes.grm.bin \
   --n-threads 16
 
-# Step 1: Fit null model for a gene
+# Step 1: Fit null model for a gene (using pre-computed GRM)
 target/release/step1-fit-null \
-  --plink-file data/genotypes \
   --grm-file data/genotypes.grm.bin \
   --pheno-covar-file data/expression_with_covariates.tsv \
   --trait-name ENSG00000000003 \

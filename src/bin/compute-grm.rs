@@ -5,10 +5,11 @@
 //! the GRM for each gene/trait.
 
 use clap::Parser;
-use saige_qtl_rust::grm::build_grm_from_plink;
+use saige_qtl_rust::{
+    grm::{build_grm_from_plink, save_grm_to_file},
+    io::get_fam_samples,
+};
 use std::path::PathBuf;
-use std::fs::File;
-use std::io::BufWriter;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -44,17 +45,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .num_threads(cli.n_threads)
         .build_global()?;
 
+    // Get sample IDs from FAM file
+    log::info!("Reading sample IDs from .fam file...");
+    let sample_ids = get_fam_samples(&cli.plink_file)?;
+    log::info!("Found {} samples in .fam file", sample_ids.len());
+
     // Compute GRM
     log::info!("Computing GRM from PLINK file...");
     let grm = build_grm_from_plink(&cli.plink_file, cli.n_threads)?;
     
     log::info!("GRM computed: {} x {} matrix", grm.nrows(), grm.ncols());
 
-    // Save GRM to file
+    // Save GRM with sample IDs to file
     log::info!("Saving GRM to {:?}", cli.output_file);
-    let file = File::create(&cli.output_file)?;
-    let writer = BufWriter::new(file);
-    bincode::serialize_into(writer, &grm)?;
+    save_grm_to_file(&cli.output_file, &grm, &sample_ids)?;
 
     log::info!("GRM saved successfully");
     log::info!("File size: {} MB", 
