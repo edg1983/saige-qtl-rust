@@ -7,15 +7,15 @@ use std::path::Path;
 /// Calculates the GRM (A = XX^T / M) from a PLINK .bed file.
 /// Assumes the .bed file samples are in the *exact* order as `master_sample_ids`.
 /// This alignment must be guaranteed by the caller.
+/// Note: The global rayon thread pool should be initialized by the caller.
 pub fn build_grm_from_plink(
     plink_file_no_ext: &Path,
     n_threads: usize,
 ) -> Result<Array2<f64>, Box<dyn std::error::Error>> {
     
-    // Set rayon thread pool size
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(n_threads)
-        .build_global()?;
+    // Note: Thread pool is initialized globally by the caller (main)
+    // We just use the n_threads parameter for logging purposes
+    log::info!("Building GRM using {} threads", n_threads);
 
     let bed_path = plink_file_no_ext.with_extension("bed");
     let mut bed = Bed::new(bed_path)?;
