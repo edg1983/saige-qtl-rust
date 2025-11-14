@@ -349,10 +349,34 @@ Indexed VCF or BCF file with dosage (DS) or genotype (GT) information.
 
 ## Performance Tips
 
-- Use `--n-threads` to leverage multiple CPU cores
-- For large datasets, test regions in parallel using `--region`
-- Pre-filter VCF files to relevant variants before testing
-- Use BCF format for faster I/O compared to VCF
+### Multi-threading Configuration
+
+The software uses both Rust parallelism (rayon) and BLAS multi-threading for optimal performance:
+
+```bash
+# Set BLAS threads (should match --n-threads)
+export OPENBLAS_NUM_THREADS=16
+export MKL_NUM_THREADS=16  # If using Intel MKL
+export BLIS_NUM_THREADS=16  # If using BLIS
+
+# Run with matching thread count
+target/release/step1-fit-null \
+  --n-threads 16 \
+  [other options...]
+```
+
+**Important**: Always set BLAS threading environment variables to match `--n-threads` for maximum efficiency during:
+- REML optimization (tau estimation)
+- Matrix inversions and Cholesky decompositions
+- GRM expansion for single-cell data
+
+### Additional Optimization Tips
+
+- **Parallel Region Testing**: For large datasets, test regions in parallel using `--region` across multiple jobs
+- **Pre-filter VCF**: Filter VCF files to relevant variants before testing to reduce I/O
+- **BCF Format**: Use BCF format for faster I/O compared to compressed VCF
+- **Pre-compute GRM**: Use `compute-grm` once and reuse for all traits to avoid repeated computation
+- **Single-cell Data**: For very large cell counts (>50k cells), monitor memory during GRM expansion as it creates NxN matrices
 
 ## Logging
 

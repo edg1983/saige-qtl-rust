@@ -3,6 +3,7 @@ use crate::{NullModelFit, TraitType, io::AlignedData};
 use ndarray::{Array1, Array2};
 // CORRECTED: Import `Solve` trait
 use ndarray_linalg::{Cholesky, Inverse, Solve};
+use rayon::prelude::*;
 
 // --- Updated argmin imports ---
 // CORRECTED: The trait is `CostFunction`, as you pointed out. `Problem` is a struct.
@@ -73,15 +74,23 @@ impl CostFunction for RemlCost {
         let v_inv_y = chol_v.solve(&self.y)
             .map_err(|e| argmin::core::Error::from(ModelError::LinAlg(e.to_string())))?;
         
-        // For matrices, we need to solve column by column
+        // For matrices, we solve column by column in parallel
         let n_covars = self.x.ncols();
         let n_samples = self.x.nrows();
+        
+        // Parallel column solving
+        let v_inv_x_cols: Vec<Array1<f64>> = (0..n_covars)
+            .into_par_iter()
+            .map(|j| {
+                let col = self.x.column(j);
+                chol_v.solve(&col.to_owned())
+                    .map_err(|e| argmin::core::Error::from(ModelError::LinAlg(e.to_string())))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        
         let mut v_inv_x = Array2::zeros((n_samples, n_covars));
-        for j in 0..n_covars {
-            let col = self.x.column(j);
-            let v_inv_col = chol_v.solve(&col.to_owned())
-                .map_err(|e| argmin::core::Error::from(ModelError::LinAlg(e.to_string())))?;
-            v_inv_x.column_mut(j).assign(&v_inv_col);
+        for (j, col_data) in v_inv_x_cols.into_iter().enumerate() {
+            v_inv_x.column_mut(j).assign(&col_data);
         }
 
         let x_t_v_inv_x = self.x.t().dot(&v_inv_x);
@@ -191,13 +200,22 @@ pub fn fit_null_glmm(
 
     // We need V_inv for P_X, so calculate it directly.
     // CORRECTED: `Cholesky` doesn't have `.inverse()`. We solve against Identity column by column.
+    // Use parallel processing for large matrices
+    log::info!("Computing V_inv matrix ({} x {}) in parallel...", n, n);
+    
+    let v_inv_cols: Vec<Array1<f64>> = (0..n)
+        .into_par_iter()
+        .map(|j| {
+            let mut col = Array1::zeros(n);
+            col[j] = 1.0; // j-th column of identity
+            chol_v.solve(&col)
+                .map_err(|e| ModelError::LinAlg(e.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    
     let mut v_inv = Array2::zeros((n, n));
-    for j in 0..n {
-        let mut col = Array1::zeros(n);
-        col[j] = 1.0; // j-th column of identity
-        let v_inv_col = chol_v.solve(&col)
-            .map_err(|e| ModelError::LinAlg(e.to_string()))?;
-        v_inv.column_mut(j).assign(&v_inv_col);
+    for (j, col_data) in v_inv_cols.into_iter().enumerate() {
+        v_inv.column_mut(j).assign(&col_data);
     }
     
     // CORRECTED: This logic is now valid.

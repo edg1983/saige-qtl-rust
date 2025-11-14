@@ -99,6 +99,7 @@ pub fn subset_grm(
 
 /// Expands a donor-level GRM to cell-level using a mapping matrix
 /// For single-cell data where multiple cells belong to the same donor
+/// Uses parallel processing for efficient expansion of large matrices
 pub fn expand_grm_to_cell_level(
     grm: &Array2<f64>,
     unique_donor_ids: &[String],
@@ -129,16 +130,27 @@ pub fn expand_grm_to_cell_level(
     }
     
     // Expand the GRM: cell_grm[i,j] = donor_grm[donor_of_cell_i, donor_of_cell_j]
+    // Use parallel processing for rows
     let n_cells = cell_donor_ids.len();
-    let mut expanded_grm = Array2::zeros((n_cells, n_cells));
     
-    for i in 0..n_cells {
-        for j in 0..n_cells {
+    // Collect rows in parallel
+    let rows: Vec<Vec<f64>> = (0..n_cells)
+        .into_par_iter()
+        .map(|i| {
             let donor_i = cell_to_donor_idx[i];
-            let donor_j = cell_to_donor_idx[j];
-            expanded_grm[[i, j]] = grm[[donor_i, donor_j]];
-        }
-    }
+            (0..n_cells)
+                .map(|j| {
+                    let donor_j = cell_to_donor_idx[j];
+                    grm[[donor_i, donor_j]]
+                })
+                .collect()
+        })
+        .collect();
+    
+    // Flatten and create array
+    let flat_data: Vec<f64> = rows.into_iter().flatten().collect();
+    let expanded_grm = Array2::from_shape_vec((n_cells, n_cells), flat_data)
+        .map_err(|e| format!("Failed to create expanded GRM: {}", e))?;
     
     log::info!("GRM expansion complete: {} x {} matrix", 
         expanded_grm.nrows(), expanded_grm.ncols());
