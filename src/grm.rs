@@ -158,18 +158,45 @@ pub fn expand_grm_to_cell_level(
     Ok(expanded_grm)
 }
 
-/// Calculates the GRM (A = XX^T / M) from a PLINK .bed file.
+/// Calculates the GRM (A = XX^T / M) from a PLINK .bed file with filtering options.
 /// Assumes the .bed file samples are in the *exact* order as `master_sample_ids`.
 /// This alignment must be guaranteed by the caller.
 /// Note: The global rayon thread pool should be initialized by the caller.
+/// 
+/// # Arguments
+/// * `plink_file_no_ext` - Path to PLINK file prefix (without .bed/.bim/.fam extension)
+/// * `n_threads` - Number of threads to use (for logging, actual parallelism uses global rayon pool)
+/// * `min_maf` - Minimum MAF threshold (default: 0.001)
+/// * `max_missing_rate` - Maximum missing rate threshold (default: 0.05)
+/// * `num_random_markers` - If Some(n), randomly select n markers; if None, use all passing filters
+/// * `relatedness_cutoff` - If Some(cutoff), set GRM values < cutoff to 0 (sparsification)
 pub fn build_grm_from_plink(
     plink_file_no_ext: &Path,
     n_threads: usize,
+) -> Result<Array2<f64>, Box<dyn std::error::Error>> {
+    build_grm_from_plink_filtered(plink_file_no_ext, n_threads, 0.0, 1.0, None, None)
+}
+
+/// Calculates the GRM with full filtering options
+pub fn build_grm_from_plink_filtered(
+    plink_file_no_ext: &Path,
+    n_threads: usize,
+    min_maf: f64,
+    max_missing_rate: f64,
+    num_random_markers: Option<usize>,
+    relatedness_cutoff: Option<f64>,
 ) -> Result<Array2<f64>, Box<dyn std::error::Error>> {
     
     // Note: Thread pool is initialized globally by the caller (main)
     // We just use the n_threads parameter for logging purposes
     log::info!("Building GRM using {} threads", n_threads);
+    log::info!("  Filtering: minMAF={}, maxMissingRate={}", min_maf, max_missing_rate);
+    if let Some(n) = num_random_markers {
+        log::info!("  Random marker selection: {} markers", n);
+    }
+    if let Some(cutoff) = relatedness_cutoff {
+        log::info!("  Relatedness cutoff (sparsification): {}", cutoff);
+    }
 
     let bed_path = plink_file_no_ext.with_extension("bed");
     let mut bed = Bed::new(bed_path)?;
@@ -179,23 +206,24 @@ pub fn build_grm_from_plink(
 
     // Read all genotypes into memory
     // This is (n_variants, n_samples)
-    let genotypes_flat = bed.read()?;
-    let mut genotype_matrix = genotypes_flat.into_shape((n_variants, n_samples))?;
+    let genotypes_flat = bed.read::<i8>()?;
+    let genotype_matrix = genotypes_flat.into_shape((n_variants, n_samples))?;
     
     log::info!(
         "Read genotype matrix: {} variants x {} samples",
         n_variants, n_samples
     );
 
-    // 1. Center and standardize genotypes
-    // We parallelize over variants (rows)
-    let genotype_means_vars: Vec<(f64, f64)> = genotype_matrix
+    // 1. Calculate MAF and missing rate for each variant, and filter
+    log::info!("Filtering variants by MAF and missing rate...");
+    let variant_stats: Vec<(f64, f64, f64, f64)> = genotype_matrix
         .axis_iter(Axis(0)) // Iterate over rows (variants)
         .into_par_iter()
         .map(|row| {
             let mut sum = 0.0;
             let mut sum_sq = 0.0;
             let mut count = 0;
+            let mut missing_count = 0;
             
             for &g_code in row.iter() {
                 if g_code != i8::MIN { // i8::MIN (-128) is missing in bed-reader
@@ -203,16 +231,69 @@ pub fn build_grm_from_plink(
                     sum += g;
                     sum_sq += g * g;
                     count += 1;
+                } else {
+                    missing_count += 1;
                 }
             }
 
+            let total = count + missing_count;
+            let missing_rate = if total > 0 { missing_count as f64 / total as f64 } else { 1.0 };
+            
             if count == 0 {
-                return (0.0, 1.0); // No data, mean 0, variance 1 (will be zeroed)
+                return (0.0, 1.0, 1.0, 0.0); // No data: mean=0, var=1, missing_rate=1, maf=0
             }
             
             let mean = sum / count as f64;
             let var = (sum_sq / count as f64) - (mean * mean);
-            // Handle invariant sites
+            
+            // Calculate MAF: mean / 2 gives allele frequency, MAF is min(freq, 1-freq)
+            let freq = mean / 2.0;
+            let maf = freq.min(1.0 - freq);
+            
+            (mean, var.max(1e-6), missing_rate, maf)
+        })
+        .collect();
+
+    // Filter variants based on MAF and missing rate
+    let mut valid_indices: Vec<usize> = variant_stats
+        .iter()
+        .enumerate()
+        .filter(|(_, &(_, _, missing_rate, maf))| {
+            maf >= min_maf && missing_rate <= max_missing_rate
+        })
+        .map(|(idx, _)| idx)
+        .collect();
+    
+    log::info!("Variants passing filters: {} / {}", valid_indices.len(), n_variants);
+    
+    if valid_indices.is_empty() {
+        return Err("No variants passed MAF and missing rate filters".into());
+    }
+    
+    // 2. Random marker selection if requested
+    if let Some(n_random) = num_random_markers {
+        if n_random < valid_indices.len() {
+            use rand::seq::SliceRandom;
+            use rand::SeedableRng;
+            let mut rng = rand::rngs::StdRng::seed_from_u64(42); // Fixed seed for reproducibility
+            valid_indices.shuffle(&mut rng);
+            valid_indices.truncate(n_random);
+            log::info!("Selected {} random markers from {} passing filters", n_random, valid_indices.len());
+        } else {
+            log::info!("Requested {} random markers but only {} available, using all", 
+                      n_random, valid_indices.len());
+        }
+    }
+    
+    let n_markers_used = valid_indices.len();
+    log::info!("Using {} markers for GRM calculation", n_markers_used);
+
+    // 3. Center and standardize genotypes (only for selected markers)
+    // We parallelize over variants (rows)
+    let genotype_means_vars: Vec<(f64, f64)> = valid_indices
+        .par_iter()
+        .map(|&idx| variant_stats[idx])
+        .map(|(mean, var, _, _)| {
             if var < 1e-6 {
                 (mean, 1.0) // Set std_dev to 1.0 to avoid division by zero
             } else {
@@ -221,35 +302,57 @@ pub fn build_grm_from_plink(
         })
         .collect();
 
-    genotype_matrix.axis_iter_mut(Axis(0)) // Iterate over rows
+    // Now center and standardize each selected variant
+    // We only process the selected variants, not all
+    let mut selected_genotypes = Array2::<i8>::zeros((n_markers_used, n_samples));
+    
+    selected_genotypes
+        .axis_iter_mut(Axis(0))
         .into_par_iter()
-        .enumerate()
-        .for_each(|(i, mut row)| {
-            let (mean, var) = genotype_means_vars[i];
+        .zip(valid_indices.par_iter())
+        .zip(genotype_means_vars.par_iter())
+        .for_each(|((mut out_row, &var_idx), &(mean, var))| {
             let std_dev = var.sqrt();
-            
-            for g_code in row.iter_mut() {
-                if *g_code == i8::MIN { // Missing
-                    *g_code = 0; // Impute to mean (which is 0 after centering)
+            let in_row = genotype_matrix.row(var_idx);
+            for (out_g, &in_g) in out_row.iter_mut().zip(in_row.iter()) {
+                if in_g != i8::MIN {
+                    let g_f = in_g as f64;
+                    let standardized = (g_f - mean) / std_dev;
+                    // Scale by 32 for i8 storage efficiency
+                    *out_g = (standardized * 32.0).round() as i8;
                 } else {
-                    let g_centered = (*g_code as f64 - mean) / std_dev;
-                    // Store as i8 for memory efficiency before final cast
-                    // This is a slight precision loss, but common
-                    *g_code = (g_centered * 32.0).round() as i8; 
+                    *out_g = 0; // Impute missing to 0 after standardization (mean = 0)
                 }
             }
         });
 
-    // 2. Compute GRM: A = X * X^T / M
-    // X is now the standardized (n_variants, n_samples) matrix
-    // We want (n_samples, n_samples)
-    // Let's transpose X to (n_samples, n_variants)
-    let x_t = genotype_matrix.t().mapv(|v| v as f64 / 32.0); // Back to f64
-    
-    log::info!("Computing GRM ({} x {})", n_samples, n_samples);
-    
-    // A = (X_t * X_t^T) / M
-    let grm = x_t.dot(&x_t.t()) / (n_variants as f64);
+    // 4. Convert to f64 matrix for GRM calculation
+    // Shape: (n_markers_used, n_samples)
+    let genotypes_f64: Array2<f64> = selected_genotypes.mapv(|x| x as f64 / 32.0);
 
+    // 5. Compute GRM = (1/M) * X^T * X
+    // X is (n_markers_used, n_samples), so X^T is (n_samples, n_markers_used)
+    // GRM is (n_samples, n_samples)
+    log::info!("Computing GRM ({} x {})...", n_samples, n_samples);
+    let xt = genotypes_f64.t(); // (n_samples, n_markers_used)
+    let mut grm = xt.dot(&genotypes_f64) / (n_markers_used as f64);
+
+    // 6. Apply relatedness cutoff (sparsification) if requested
+    if let Some(cutoff) = relatedness_cutoff {
+        log::info!("Applying relatedness cutoff: setting values < {} to 0", cutoff);
+        let mut n_zeroed = 0;
+        for i in 0..n_samples {
+            for j in 0..n_samples {
+                if i != j && grm[[i, j]].abs() < cutoff {
+                    grm[[i, j]] = 0.0;
+                    n_zeroed += 1;
+                }
+            }
+        }
+        log::info!("Set {} off-diagonal elements to 0 ({}% of off-diagonal)", 
+                  n_zeroed, 100.0 * n_zeroed as f64 / (n_samples * (n_samples - 1)) as f64);
+    }
+
+    log::info!("GRM computed with shape {:?}", grm.dim());
     Ok(grm)
 }

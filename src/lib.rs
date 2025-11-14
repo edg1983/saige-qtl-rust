@@ -35,8 +35,12 @@ pub struct NullModelFit {
     pub gene_name: String,
     /// Trait type used for the model
     pub trait_type: TraitType,
-    /// Sample IDs used in the fit
+    /// Sample IDs used in the fit (CELL IDs for single-cell data)
     pub sample_ids: Vec<String>,
+    /// Donor IDs for single-cell data (for VCF matching)
+    /// For bulk data, this will be identical to sample_ids
+    /// For single-cell data, this maps cells to donors (length = sample_ids.len())
+    pub donor_ids: Vec<String>,
     // Note: The projection matrix P_X and residuals are the core
     // components needed by Step 2. Other components like `mu` and `y`
     // are included to support SPA calculations, matching the R

@@ -1,7 +1,7 @@
 //! Module for running association tests (Score test + SPA)
 use crate::{NullModelFit, TraitType};
 use rust_htslib::{bcf, bcf::Read};
-use ndarray::{Array1, Array2, Axis}; // <-- Added Axis
+use ndarray::{Array1, Array2};
 use std::path::Path;
 // CORRECTED: Import `Continuous` trait for `.pdf()`
 use statrs::distribution::{Continuous, ContinuousCDF, Normal};
@@ -67,37 +67,56 @@ pub fn run_parallel_tests(
     let mut vcf = bcf::IndexedReader::from_path(vcf_file)?;
     let header = vcf.header().clone(); // Clone the header to avoid borrowing issues
     
-    // Align VCF samples to null model samples
+    // Align VCF samples (DONOR IDs) to null model donor IDs
     let vcf_samples = header.samples();
-    let model_samples = &null_model.sample_ids;
+    let model_donor_ids = &null_model.donor_ids;  // For VCF matching
+    let model_sample_ids = &null_model.sample_ids;  // Cell IDs
     
-    log::info!("VCF has {} samples", vcf_samples.len());
-    log::info!("Null model has {} samples", model_samples.len());
+    log::info!("VCF has {} samples (donors)", vcf_samples.len());
+    log::info!("Null model has {} donors", model_donor_ids.len());
+    log::info!("Null model has {} cells", model_sample_ids.len());
     
-    // CORRECTED: `vcf_samples` is Vec<&[u8]>, function expects &[&[u8]]. Add borrow.
-    let (vcf_indices, model_indices) = align_samples(&vcf_samples, model_samples);
+    // Align VCF donors to model donors
+    let (vcf_indices, donor_indices) = align_samples(&vcf_samples, model_donor_ids);
     
-    log::info!("Sample alignment: {} overlapping samples", model_indices.len());
+    log::info!("Sample alignment: {} overlapping donors", donor_indices.len());
     
-    if model_indices.len() < 10 {
-        return Err(format!("Only {} samples overlap between VCF and null model. Stopping.", model_indices.len()).into());
+    if donor_indices.len() < 10 {
+        return Err(format!("Only {} donors overlap between VCF and null model. Stopping.", donor_indices.len()).into());
     }
     
-    log::debug!("First 5 overlapping samples (VCF indices): {:?}", &vcf_indices.iter().take(5).collect::<Vec<_>>());
-    log::debug!("First 5 overlapping samples (Model indices): {:?}", &model_indices.iter().take(5).collect::<Vec<_>>());
+    log::debug!("First 5 overlapping donors (VCF indices): {:?}", &vcf_indices.iter().take(5).collect::<Vec<_>>());
+    log::debug!("First 5 overlapping donors (Model indices): {:?}", &donor_indices.iter().take(5).collect::<Vec<_>>());
     
-    // Subset the null model components to match the *VCF sample order*
-    let p_x = null_model.p_x_matrix.select(Axis(0), &model_indices)
-                                 .select(Axis(1), &model_indices);
-    let res = null_model.residuals.select(Axis(0), &model_indices);
-    let mu = null_model.mu.select(Axis(0), &model_indices);
-    let y = null_model.y.select(Axis(0), &model_indices);
+    // Build donor-to-cell mapping
+    // For each cell, record which donor it belongs to (using donor indices after VCF alignment)
+    let mut cell_to_donor_idx: Vec<Option<usize>> = vec![None; model_sample_ids.len()];
+    for (cell_idx, donor_id) in model_donor_ids.iter().enumerate() {
+        // Find which position this donor_id is in the aligned donor list
+        if let Some(pos) = donor_indices.iter().position(|&idx| &model_donor_ids[idx] == donor_id) {
+            cell_to_donor_idx[cell_idx] = Some(pos);
+        }
+    }
+    
+    // Count how many cells we can analyze (those with aligned donors)
+    let n_cells_with_donors = cell_to_donor_idx.iter().filter(|x| x.is_some()).count();
+    log::info!("{} cells have donors in the VCF", n_cells_with_donors);
+    
+    if n_cells_with_donors < 10 {
+        return Err(format!("Only {} cells have donors in VCF. Stopping.", n_cells_with_donors).into());
+    }
+    
+    // No subsetting - use full cell-level matrices
+    let p_x = &null_model.p_x_matrix;  // n_cells x n_cells
+    let res = &null_model.residuals;  // n_cells
+    let mu = &null_model.mu;  // n_cells
+    let y = &null_model.y;  // n_cells
 
-    log::debug!("Null model components subsetted to {} samples", model_indices.len());
+    log::debug!("Using full cell-level matrices: {} cells", model_sample_ids.len());
     log::debug!("P_X matrix shape: [{}, {}]", p_x.nrows(), p_x.ncols());
 
     // Pre-calculate P_X * res
-    let p_x_res = p_x.dot(&res);
+    let p_x_res = p_x.dot(res);  // No & needed - both are references
     log::debug!("Pre-calculated P_X * residuals");
 
     if let Some(r) = region {
@@ -144,8 +163,8 @@ pub fn run_parallel_tests(
         .into_par_iter()
         .filter_map(|(mut record, chr, pos, rsid)| {
 
-            // 1. Extract Genotypes and calculate MAC (before centering)
-            let (g, mac) = match extract_genotypes(&mut record, vcf_field, &vcf_indices) {
+            // 1. Extract Genotypes at DONOR level and calculate MAC
+            let (g_donor, mac) = match extract_genotypes(&mut record, vcf_field, &vcf_indices) {
                 Ok(result) => result,
                 Err(e) => {
                     log::trace!("Failed to extract genotypes for {}:{}:{} - {}", chr, pos, rsid, e);
@@ -153,14 +172,39 @@ pub fn run_parallel_tests(
                 }
             };
             
-            // 2. Filter by MAC
+            // 2. Expand donor-level genotypes to cell-level
+            // For each cell, copy the genotype from its corresponding donor
+            let mut g_cells = Array1::zeros(model_sample_ids.len());
+            let mut n_cells_analyzed = 0;
+            
+            for (cell_idx, donor_idx_opt) in cell_to_donor_idx.iter().enumerate() {
+                if let Some(donor_idx) = donor_idx_opt {
+                    // This cell has a donor in the VCF
+                    g_cells[cell_idx] = g_donor[*donor_idx];
+                    n_cells_analyzed += 1;
+                } else {
+                    // This cell's donor is not in the VCF - set to 0 (will be centered anyway)
+                    g_cells[cell_idx] = 0.0;
+                }
+            }
+            
+            if n_cells_analyzed == 0 {
+                log::trace!("Variant {}:{}:{} has no cells with genotypes", chr, pos, rsid);
+                return None;
+            }
+            
+            // 3. Filter by MAC (MAC is already calculated at donor level)
             if mac < min_mac {
                 log::trace!("Variant {}:{}:{} filtered by MAC: {:.2} < {}", chr, pos, rsid, mac, min_mac);
                 return None; // Skip
             }
 
-            // 3. Run Score Test (uses centered genotypes)
-            let (score, var2) = score_test(&g, &p_x, &p_x_res);
+            // 4. Center cell-level genotypes for association testing
+            let mean_g = g_cells.sum() / n_cells_analyzed as f64;
+            g_cells.mapv_inplace(|v| v - mean_g);
+            
+            // 5. Run Score Test with cell-level genotypes
+            let (score, var2) = score_test(&g_cells, &p_x, &p_x_res);
             
             // Apply variance ratio correction (matches R SAIGE: var1 = var2 * varRatio)
             let var = var2 * null_model.var_ratio;
@@ -170,12 +214,12 @@ pub fn run_parallel_tests(
                 return None; 
             }
 
-            // 4. Calculate effect size (BETA) and standard error (SE)
+            // 6. Calculate effect size (BETA) and standard error (SE)
             // SAIGE formula: beta = Score / var1, se = |beta| / sqrt(|stat|), where stat = Score^2 / var1
             let beta = score / var;
             let se = 1.0 / var.sqrt();
 
-            // 5. Calculate P-value
+            // 7. Calculate P-value
             let pval = if null_model.trait_type == TraitType::Quantitative {
                 // Standard score test (Chi-sq 1-dof)
                 let chi_sq = score * score / var;
@@ -184,11 +228,11 @@ pub fn run_parallel_tests(
                 2.0 * normal.cdf(-chi_sq.sqrt())
             } else {
                 // Use Saddlepoint Approximation (SPA)
-                run_spa(score, &g, &mu, &y).unwrap_or(1.0)
+                run_spa(score, &g_cells, &mu, &y).unwrap_or(1.0)
             };
             
-            log::trace!("Variant {}:{}:{} passed: MAC={:.2}, beta={:.4}, se={:.4}, pval={:.2e}, var2={:.4}, var_ratio={:.4}", 
-                       chr, pos, rsid, mac, beta, se, pval, var2, null_model.var_ratio);
+            log::trace!("Variant {}:{}:{} passed: MAC={:.2}, beta={:.4}, se={:.4}, pval={:.2e}, var2={:.4}, var_ratio={:.4}, n_cells={}", 
+                       chr, pos, rsid, mac, beta, se, pval, var2, null_model.var_ratio, n_cells_analyzed);
             
             Some(AssocResult {
                 chr, // This is now a String
@@ -199,7 +243,7 @@ pub fn run_parallel_tests(
                 se,
                 pval,
                 mac,
-                n_samples: model_indices.len(),
+                n_samples: n_cells_analyzed,  // Now reports actual cell count
             })
         })
         .collect();
@@ -326,12 +370,10 @@ fn extract_genotypes(
     // Calculate stats for debugging
     let mean_before = g.mean().unwrap_or(0.0);
     
-    log::trace!("Genotype extraction: mean={:.4}, allele_sum={:.4}, MAC={:.4}, n_samples={}", 
+    log::trace!("Genotype extraction (DONOR level): mean={:.4}, allele_sum={:.4}, MAC={:.4}, n_donors={}", 
                mean_before, allele_sum, mac, n_samples_out);
     
-    // Center genotypes for association testing
-    let mean = g.mean().unwrap_or(0.0);
-    g.mapv_inplace(|v| v - mean);
+    // DO NOT center here - we'll center at cell level after expansion
     
     Ok((g, mac))
 }

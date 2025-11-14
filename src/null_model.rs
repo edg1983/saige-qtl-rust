@@ -143,11 +143,26 @@ impl PrecomputedComponents {
         &self,
         y_cells: &Array1<f64>, // Gene expression at cell level
         x_cells: &Array2<f64>, // Cell-level covariates (includes donor + cell covariates)
-        sample_ids: &[String],
+        sample_ids: &[String],  // Cell IDs
+        donor_ids: &[String],   // Donor IDs for VCF matching
     ) -> Result<NullModelFit, ModelError> {
         let n_cells = y_cells.len();
         let n_covars = x_cells.ncols();
         let n_donors = self.donor_v_inv.nrows();
+        
+        if sample_ids.len() != n_cells {
+            return Err(ModelError::Dimensions(format!(
+                "Sample IDs length ({}) doesn't match y length ({})",
+                sample_ids.len(), n_cells
+            )));
+        }
+        
+        if donor_ids.len() != n_cells {
+            return Err(ModelError::Dimensions(format!(
+                "Donor IDs length ({}) doesn't match y length ({})",
+                donor_ids.len(), n_cells
+            )));
+        }
         
         log::debug!("Fast fitting: {} cells, {} donors, {} covariates", n_cells, n_donors, n_covars);
         
@@ -234,6 +249,7 @@ impl PrecomputedComponents {
             gene_name: "STUB".to_string(),
             trait_type: TraitType::Quantitative,
             sample_ids: sample_ids.to_vec(),
+            donor_ids: donor_ids.to_vec(),
         })
     }
 }
@@ -481,5 +497,6 @@ pub fn fit_null_glmm(
         gene_name: "STUB_GENE".into(), // Will be passed in
         trait_type: trait_type.clone(),
         sample_ids: aligned_data.sample_ids.clone(),
+        donor_ids: aligned_data.donor_ids.clone(),
     })
 }

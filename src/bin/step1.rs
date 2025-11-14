@@ -48,8 +48,15 @@ struct Cli {
     trait_name: String,
 
     /// Column name for sample IDs in phenotype file
+    /// For single-cell data, this should be the CELL ID column
     #[arg(long, required = true)]
     sample_id_col: String,
+    
+    /// Column name for donor IDs in phenotype file (for single-cell data)
+    /// For bulk data, leave empty (donor_ids will equal sample_ids)
+    /// For single-cell data, this maps cells to donors for genotype matching
+    #[arg(long)]
+    donor_id_col: Option<String>,
     
     /// Column name for sample IDs in sample covariate file
     #[arg(long, default_value = "IID")]
@@ -86,9 +93,9 @@ struct Cli {
     #[arg(long, default_value_t = 100)]
     max_iter: u64,
 
-    /// Convergence epsilon for REML optimization
-    #[arg(long, default_value_t = 1e-4)]
-    eps: f64,
+    /// Tolerance for REML convergence
+    #[arg(long, default_value_t = 0.00001)]
+    tol: f64,
     
     /// Cutoff for variance ratio (tau). Not used in this implementation.
     #[arg(long, default_value = "0.01")]
@@ -143,6 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &cli.pheno_covar_file,
         &cli.trait_name,
         &cli.sample_id_col,
+        cli.donor_id_col.as_deref(),  // NEW: Pass donor ID column
         cell_covariate_cols,
         &master_sample_ids,
     )?;
@@ -210,7 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &aligned_data.sample_ids,
             cli.tau_init[0],
             cli.max_iter,
-            cli.eps,
+            cli.tol,
         )?;
         
         log::info!("Donor-level components precomputed successfully");
@@ -222,6 +230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &aligned_data.y,
             &aligned_data.x,
             &aligned_data.sample_ids,
+            &aligned_data.donor_ids,  // NEW: Pass donor IDs
         )?;
         
         fit.gene_name = cli.trait_name.clone();
@@ -239,7 +248,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &cli.trait_type,
             cli.tau_init,
             cli.max_iter,
-            cli.eps,
+            cli.tol,
         )?;
         
         fit.gene_name = cli.trait_name.clone();

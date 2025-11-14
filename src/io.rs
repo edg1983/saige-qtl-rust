@@ -23,8 +23,11 @@ pub struct AlignedData {
     pub y: Array1<f64>,
     /// Covariate matrix (X), including intercept
     pub x: Array2<f64>,
-    /// Aligned sample IDs, in order
+    /// Aligned sample IDs, in order (CELL IDs for single-cell data)
     pub sample_ids: Vec<String>,
+    /// Aligned donor IDs, in order (for VCF matching in single-cell data)
+    /// For bulk data, this is identical to sample_ids
+    pub donor_ids: Vec<String>,
 }
 
 /// Loads a single file containing both phenotypes and covariates, then subsets
@@ -33,6 +36,7 @@ pub fn load_aligned_data(
     pheno_covar_file: &Path,
     trait_name: &str,
     sample_id_col: &str,
+    donor_id_col: Option<&str>,  // NEW: Optional donor ID column
     covariate_cols: &[String],
     master_sample_ids: &[String],
 ) -> Result<AlignedData, IoError> {
@@ -151,9 +155,36 @@ pub fn load_aligned_data(
         )));
     }
     
+    // 6. Extract donor IDs if specified (for single-cell data)
+    let donor_ids = if let Some(donor_col) = donor_id_col {
+        log::info!("Extracting donor IDs from column '{}'", donor_col);
+        
+        // Cast donor ID column to string
+        let donor_id_series = filtered_data.column(donor_col)?.clone();
+        let donor_id_as_str = donor_id_series.cast(&DataType::String)?;
+        
+        donor_id_as_str
+            .str()?
+            .into_iter()
+            .map(|opt_s| opt_s.map(String::from))
+            .collect::<Option<Vec<String>>>()
+            .ok_or(IoError::Alignment(format!("Donor ID column '{}' contains nulls", donor_col)))?
+    } else {
+        // For bulk data, donor IDs = sample IDs
+        log::info!("No donor ID column specified - using sample IDs as donor IDs (bulk data mode)");
+        sample_ids.clone()
+    };
+    
+    if donor_ids.len() != n_samples {
+        return Err(IoError::Alignment(format!(
+            "Donor ID vector has {} values but expected {} samples",
+            donor_ids.len(), n_samples
+        )));
+    }
+    
     log::info!("Data alignment completed successfully: {} samples with {} covariates", n_samples, n_covars);
 
-    Ok(AlignedData { y, x, sample_ids })
+    Ok(AlignedData { y, x, sample_ids, donor_ids })
 }
 
 /// Reads sample IDs from a .fam file

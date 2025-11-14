@@ -6,7 +6,7 @@
 
 use clap::Parser;
 use saige_qtl_rust::{
-    grm::{build_grm_from_plink, save_grm_to_file},
+    grm::{build_grm_from_plink_filtered, save_grm_to_file},
     io::get_fam_samples,
 };
 use std::path::PathBuf;
@@ -29,6 +29,24 @@ struct Cli {
     /// Number of threads to use
     #[arg(long, default_value_t = 1)]
     n_threads: usize,
+
+    /// Minimum minor allele frequency (MAF) for variants to include in GRM
+    #[arg(long, default_value_t = 0.001)]
+    min_maf_for_grm: f64,
+
+    /// Maximum missing rate for variants to include in GRM
+    #[arg(long, default_value_t = 0.05)]
+    max_missing_rate_for_grm: f64,
+
+    /// Number of random markers to select for sparse GRM (optional)
+    /// If specified, randomly selects this many markers from those passing MAF/missing filters
+    #[arg(long)]
+    num_random_marker_for_sparse_kin: Option<usize>,
+
+    /// Relatedness cutoff for sparsification (optional)
+    /// If specified, sets GRM[i,j] = 0 for all i≠j where |GRM[i,j]| < cutoff
+    #[arg(long)]
+    relatedness_cutoff: Option<f64>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,6 +57,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("PLINK file: {:?}", cli.plink_file);
     log::info!("Output file: {:?}", cli.output_file);
     log::info!("Using {} threads", cli.n_threads);
+    log::info!("Filtering parameters:");
+    log::info!("  minMAFforGRM = {}", cli.min_maf_for_grm);
+    log::info!("  maxMissingRateforGRM = {}", cli.max_missing_rate_for_grm);
+    if let Some(n) = cli.num_random_marker_for_sparse_kin {
+        log::info!("  numRandomMarkerforSparseKin = {}", n);
+    }
+    if let Some(cutoff) = cli.relatedness_cutoff {
+        log::info!("  relatednessCutoff = {}", cutoff);
+    }
 
     // Set the global thread pool for rayon
     rayon::ThreadPoolBuilder::new()
@@ -50,9 +77,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sample_ids = get_fam_samples(&cli.plink_file)?;
     log::info!("Found {} samples in .fam file", sample_ids.len());
 
-    // Compute GRM
+    // Compute GRM with filtering
     log::info!("Computing GRM from PLINK file...");
-    let grm = build_grm_from_plink(&cli.plink_file, cli.n_threads)?;
+    let grm = build_grm_from_plink_filtered(
+        &cli.plink_file,
+        cli.n_threads,
+        cli.min_maf_for_grm,
+        cli.max_missing_rate_for_grm,
+        cli.num_random_marker_for_sparse_kin,
+        cli.relatedness_cutoff,
+    )?;
     
     log::info!("GRM computed: {} x {} matrix", grm.nrows(), grm.ncols());
 
