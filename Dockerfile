@@ -1,7 +1,7 @@
 # Multi-stage build for saige-qtl-rust
 # Stage 1: Build the Rust binaries
-# Use Rust 1.84+ which supports edition 2024 dependencies
-FROM rust:slim AS builder
+# Use rust:bookworm (Debian 12) to match runtime GLIBC version
+FROM rust:1-bookworm AS builder
 
 # Install system dependencies required for compilation
 RUN apt-get update && apt-get install -y \

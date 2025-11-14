@@ -140,6 +140,30 @@ docker run --rm \
 
 ## Troubleshooting
 
+### GLIBC Version Mismatch in Singularity
+
+**Error**: `version 'GLIBC_2.38' not found`
+
+**Cause**: The builder and runtime images use different GLIBC versions.
+
+**Solution**: The Dockerfile now uses `rust:1-bookworm` (Debian 12) for both build and runtime stages, ensuring GLIBC compatibility. Rebuild the image:
+
+```bash
+docker build -t saige-qtl-rust:latest .
+singularity build saige-qtl-rust.sif docker-daemon://saige-qtl-rust:latest
+```
+
+**Verification**: Test the container with the provided script:
+```bash
+./test-container-glibc.sh
+```
+
+This will verify:
+- Docker image builds correctly
+- All binaries run in Docker
+- Singularity conversion works
+- All binaries run in Singularity
+
 ### Permission Issues
 
 If you get permission errors, ensure you're running with your user ID:
