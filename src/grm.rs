@@ -97,6 +97,55 @@ pub fn subset_grm(
     Ok(subset_grm)
 }
 
+/// Expands a donor-level GRM to cell-level using a mapping matrix
+/// For single-cell data where multiple cells belong to the same donor
+pub fn expand_grm_to_cell_level(
+    grm: &Array2<f64>,
+    unique_donor_ids: &[String],
+    cell_donor_ids: &[String],
+) -> Result<Array2<f64>, Box<dyn std::error::Error>> {
+    log::info!("Expanding GRM from {} donors to {} cells", 
+        unique_donor_ids.len(), cell_donor_ids.len());
+    
+    // Create mapping from donor ID to index in the GRM
+    let donor_to_idx: std::collections::HashMap<&str, usize> = unique_donor_ids
+        .iter()
+        .enumerate()
+        .map(|(idx, id)| (id.as_str(), idx))
+        .collect();
+    
+    // Create mapping from each cell to its donor's GRM index
+    let mut cell_to_donor_idx = Vec::with_capacity(cell_donor_ids.len());
+    for cell_donor in cell_donor_ids {
+        match donor_to_idx.get(cell_donor.as_str()) {
+            Some(&idx) => cell_to_donor_idx.push(idx),
+            None => {
+                return Err(format!(
+                    "Cell belongs to donor '{}' which is not in the GRM",
+                    cell_donor
+                ).into());
+            }
+        }
+    }
+    
+    // Expand the GRM: cell_grm[i,j] = donor_grm[donor_of_cell_i, donor_of_cell_j]
+    let n_cells = cell_donor_ids.len();
+    let mut expanded_grm = Array2::zeros((n_cells, n_cells));
+    
+    for i in 0..n_cells {
+        for j in 0..n_cells {
+            let donor_i = cell_to_donor_idx[i];
+            let donor_j = cell_to_donor_idx[j];
+            expanded_grm[[i, j]] = grm[[donor_i, donor_j]];
+        }
+    }
+    
+    log::info!("GRM expansion complete: {} x {} matrix", 
+        expanded_grm.nrows(), expanded_grm.ncols());
+    
+    Ok(expanded_grm)
+}
+
 /// Calculates the GRM (A = XX^T / M) from a PLINK .bed file.
 /// Assumes the .bed file samples are in the *exact* order as `master_sample_ids`.
 /// This alignment must be guaranteed by the caller.

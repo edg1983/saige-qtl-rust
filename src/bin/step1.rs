@@ -10,7 +10,7 @@
 use clap::Parser;
 use saige_qtl_rust::{
     io::{get_fam_samples, get_unique_sample_ids, load_aligned_data},
-    grm::{build_grm_from_plink, load_grm_from_file, subset_grm},
+    grm::{build_grm_from_plink, load_grm_from_file, subset_grm, expand_grm_to_cell_level},
     null_model::fit_null_glmm,
     TraitType
 };
@@ -131,9 +131,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("{} rows in aligned data.", aligned_data.sample_ids.len());
 
     // ===================================================================
-    // 3. Load or Build GRM, then subset/align
+    // 3. Load or Build GRM, then subset/align to unique donors
     // ===================================================================
-    let grm = if let Some(grm_file) = &cli.grm_file {
+    let donor_grm = if let Some(grm_file) = &cli.grm_file {
         // Load pre-computed GRM
         log::info!("Loading pre-computed GRM from {:?}", grm_file);
         let grm_data = load_grm_from_file(grm_file)?;
@@ -150,10 +150,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         unreachable!()
     };
     
-    log::info!("GRM ready: {} x {} matrix", grm.nrows(), grm.ncols());
+    log::info!("Donor-level GRM ready: {} x {} matrix", donor_grm.nrows(), donor_grm.ncols());
+    
+    // ===================================================================
+    // 4. Expand GRM to cell level (for single-cell data)
+    // ===================================================================
+    // Check if we have multiple rows per sample (single-cell data)
+    let n_cells = aligned_data.sample_ids.len();
+    let n_donors = master_sample_ids.len();
+    
+    let grm = if n_cells > n_donors {
+        log::info!("Detected single-cell data: {} cells from {} donors", n_cells, n_donors);
+        log::info!("Expanding GRM from donor-level to cell-level...");
+        expand_grm_to_cell_level(&donor_grm, &master_sample_ids, &aligned_data.sample_ids)?
+    } else {
+        log::info!("Using donor-level GRM (one observation per donor)");
+        donor_grm
+    };
+    
+    log::info!("Final GRM: {} x {} matrix", grm.nrows(), grm.ncols());
 
     // ===================================================================
-    // 4. Fit Null GLMM
+    // 5. Fit Null GLMM
     // ===================================================================
     log::info!("Fitting GLMM using AI-REML...");
     let mut null_model_fit = fit_null_glmm(
@@ -169,7 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     null_model_fit.gene_name = cli.trait_name.clone();
 
     // ===================================================================
-    // 5. Save Output
+    // 6. Save Output
     // ===================================================================
     let output_file = PathBuf::from(format!("{}.{}.model.bin", cli.output_prefix, cli.trait_name));
     log::info!("Saving fitted null model to {:?}", &output_file);
