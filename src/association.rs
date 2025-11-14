@@ -204,7 +204,13 @@ pub fn run_parallel_tests(
             g_cells.mapv_inplace(|v| v - mean_g);
             
             // 5. Run Score Test with cell-level genotypes
-            let (score, var2) = score_test(&g_cells, &p_x, &p_x_res);
+            let (score_raw, var2) = score_test(&g_cells, &p_x, &p_x_res);
+            
+            // CRITICAL FIX: Divide score by tau (residual variance) to match R SAIGE-QTL
+            // In R C++ code (SAIGE_test.cpp line 437): S = S/m_tauvec[0]
+            // where tauvec[0] is sigma_e (residual variance component)
+            let tau = null_model.variance_components.get(1).copied().unwrap_or(1.0);
+            let score = score_raw / tau;
             
             // Apply variance ratio correction (matches R SAIGE: var1 = var2 * varRatio)
             let var = var2 * null_model.var_ratio;
@@ -215,9 +221,12 @@ pub fn run_parallel_tests(
             }
 
             // 6. Calculate effect size (BETA) and standard error (SE)
-            // SAIGE formula: beta = Score / var1, se = |beta| / sqrt(|stat|), where stat = Score^2 / var1
+            // SAIGE formula (C++ code line 407-408):
+            // t_Beta = S/var1
+            // t_seBeta = fabs(t_Beta) / sqrt(fabs(stat))  where stat = S^2/var1
             let beta = score / var;
-            let se = 1.0 / var.sqrt();
+            let stat = score * score / var;
+            let se = beta.abs() / stat.abs().sqrt();
 
             // 7. Calculate P-value
             let pval = if null_model.trait_type == TraitType::Quantitative {
