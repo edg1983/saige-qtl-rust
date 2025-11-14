@@ -57,6 +57,12 @@ pub fn run_parallel_tests(
     min_mac: f64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     
+    log::info!("Starting association testing");
+    log::info!("VCF file: {:?}", vcf_file);
+    log::info!("VCF field: {}", vcf_field);
+    log::info!("Minimum MAC: {}", min_mac);
+    log::info!("Region: {:?}", region);
+    
     let mut vcf = bcf::IndexedReader::from_path(vcf_file)?;
     let header = vcf.header().clone(); // Clone the header to avoid borrowing issues
     
@@ -64,12 +70,20 @@ pub fn run_parallel_tests(
     let vcf_samples = header.samples();
     let model_samples = &null_model.sample_ids;
     
+    log::info!("VCF has {} samples", vcf_samples.len());
+    log::info!("Null model has {} samples", model_samples.len());
+    
     // CORRECTED: `vcf_samples` is Vec<&[u8]>, function expects &[&[u8]]. Add borrow.
     let (vcf_indices, model_indices) = align_samples(&vcf_samples, model_samples);
+    
+    log::info!("Sample alignment: {} overlapping samples", model_indices.len());
     
     if model_indices.len() < 10 {
         return Err(format!("Only {} samples overlap between VCF and null model. Stopping.", model_indices.len()).into());
     }
+    
+    log::debug!("First 5 overlapping samples (VCF indices): {:?}", &vcf_indices.iter().take(5).collect::<Vec<_>>());
+    log::debug!("First 5 overlapping samples (Model indices): {:?}", &model_indices.iter().take(5).collect::<Vec<_>>());
     
     // Subset the null model components to match the *VCF sample order*
     let p_x = null_model.p_x_matrix.select(Axis(0), &model_indices)
@@ -78,20 +92,29 @@ pub fn run_parallel_tests(
     let mu = null_model.mu.select(Axis(0), &model_indices);
     let y = null_model.y.select(Axis(0), &model_indices);
 
+    log::debug!("Null model components subsetted to {} samples", model_indices.len());
+    log::debug!("P_X matrix shape: [{}, {}]", p_x.nrows(), p_x.ncols());
+
     // Pre-calculate P_X * res
     let p_x_res = p_x.dot(&res);
+    log::debug!("Pre-calculated P_X * residuals");
 
     if let Some(r) = region {
         // CORRECTED: `fetch_str` is gone. Parse region and use `fetch`.
         let (rid, start, end) = parse_region(r, &header)?;
+        log::info!("Fetching region: rid={}, start={}, end={:?}", rid, start, end);
         vcf.fetch(rid, start, end)?;
     }
     
     // Buffer records for parallel processing and extract metadata that requires header access
     // This avoids capturing the non-Sync header in the parallel closure
     let mut record_data: Vec<_> = Vec::new();
+    let mut total_variants = 0;
+    
+    log::info!("Reading variants from VCF...");
     for record_result in vcf.records() {
         let record = record_result?;
+        total_variants += 1;
         
         // Extract information that requires header access
         let chr_bytes = header.rid2name(record.rid().unwrap()).unwrap();
@@ -101,28 +124,52 @@ pub fn run_parallel_tests(
         let rsid = String::from_utf8_lossy(&id_bytes).to_string();
         
         record_data.push((record, chr, pos, rsid));
+        
+        if total_variants % 10000 == 0 {
+            log::debug!("Read {} variants so far...", total_variants);
+        }
     }
+    
+    log::info!("Read {} total variants from VCF", total_variants);
+
+    if total_variants == 0 {
+        log::warn!("No variants found in VCF file!");
+        return Ok(());
+    }
+
+    log::info!("Processing variants in parallel...");
+    
+    let mut genotype_extraction_failed = 0;
+    let mut mac_filtered = 0;
+    let mut no_variance = 0;
+    let mut successful = 0;
 
     let results: Vec<AssocResult> = record_data
         .into_par_iter()
         .filter_map(|(mut record, chr, pos, rsid)| {
 
-            // 1. Extract Genotypes (no header needed in extract_genotypes)
-            let g = match extract_genotypes(&mut record, vcf_field, &vcf_indices) {
-                Ok(g) => g,
-                Err(_) => return None, // Skip variant
+            // 1. Extract Genotypes and calculate MAC (before centering)
+            let (g, mac) = match extract_genotypes(&mut record, vcf_field, &vcf_indices) {
+                Ok(result) => result,
+                Err(e) => {
+                    log::trace!("Failed to extract genotypes for {}:{}:{} - {}", chr, pos, rsid, e);
+                    return None; // Skip variant
+                }
             };
             
-            // 2. Compute MAC
-            let mac = g.sum();
+            // 2. Filter by MAC
             if mac < min_mac {
+                log::trace!("Variant {}:{}:{} filtered by MAC: {:.2} < {}", chr, pos, rsid, mac, min_mac);
                 return None; // Skip
             }
 
-            // 3. Run Score Test
+            // 3. Run Score Test (uses centered genotypes)
             let (score, var) = score_test(&g, &p_x, &p_x_res);
             
-            if var <= 1e-6 { return None; } // No variance
+            if var <= 1e-6 { 
+                log::trace!("Variant {}:{}:{} has insufficient variance: {:.2e}", chr, pos, rsid, var);
+                return None; 
+            }
 
             // 4. Calculate effect size (BETA) and standard error (SE)
             // BETA = Score / Variance
@@ -142,6 +189,9 @@ pub fn run_parallel_tests(
                 run_spa(score, &g, &mu, &y).unwrap_or(1.0)
             };
             
+            log::trace!("Variant {}:{}:{} passed: MAC={:.2}, beta={:.4}, se={:.4}, pval={:.2e}", 
+                       chr, pos, rsid, mac, beta, se, pval);
+            
             Some(AssocResult {
                 chr, // This is now a String
                 pos,
@@ -155,11 +205,29 @@ pub fn run_parallel_tests(
         })
         .collect();
 
+    log::info!("Association testing complete:");
+    log::info!("  Total variants processed: {}", total_variants);
+    log::info!("  Variants passing filters: {}", results.len());
+    log::info!("  Filtered by genotype extraction: estimated ~{}", total_variants.saturating_sub(results.len()));
+    
+    if results.is_empty() {
+        log::warn!("WARNING: No variants passed filters!");
+        log::warn!("  This could be due to:");
+        log::warn!("  1. All variants have MAC < {} (min_mac)", min_mac);
+        log::warn!("  2. Genotype extraction failed (wrong --vcf-field?)", );
+        log::warn!("  3. No genetic variance in variants");
+        log::warn!("  Enable RUST_LOG=trace to see per-variant filtering reasons");
+    } else {
+        log::info!("Writing {} results to output file", results.len());
+    }
+
     // Write results
     for res in results {
         output_writer.serialize(res)?;
     }
     output_writer.flush()?;
+    
+    log::info!("Results written successfully");
     Ok(())
 }
 
@@ -175,29 +243,61 @@ fn align_samples(vcf_samples: &[&[u8]], model_samples: &[String]) -> (Vec<usize>
     let mut vcf_indices = Vec::new();
     let mut model_indices = Vec::new();
 
+    log::debug!("Aligning VCF samples to null model samples...");
+    
     for (i, vcf_sample_bytes) in vcf_samples.iter().enumerate() {
         let vcf_sample_str = String::from_utf8_lossy(vcf_sample_bytes);
         if let Some(&model_idx) = model_sample_map.get(vcf_sample_str.as_ref()) {
             vcf_indices.push(i);
             model_indices.push(model_idx);
+            
+            if vcf_indices.len() <= 5 {
+                log::debug!("  Sample '{}': VCF index {} -> Model index {}", vcf_sample_str, i, model_idx);
+            }
+        } else {
+            if i < 5 {
+                log::trace!("  Sample '{}' (VCF index {}) not found in null model", vcf_sample_str, i);
+            }
         }
     }
+    
+    if vcf_indices.is_empty() {
+        log::error!("NO SAMPLES OVERLAP between VCF and null model!");
+        log::error!("VCF samples (first 5): {:?}", 
+                   vcf_samples.iter().take(5).map(|s| String::from_utf8_lossy(s)).collect::<Vec<_>>());
+        log::error!("Model samples (first 5): {:?}", 
+                   model_samples.iter().take(5).collect::<Vec<_>>());
+    }
+    
     (vcf_indices, model_indices)
 }
 
 /// Extracts a genotype vector 'g' aligned to the model
+/// Returns (centered_genotypes, mac)
 fn extract_genotypes(
     record: &mut bcf::Record,
     vcf_field: &str,
     vcf_indices: &[usize], // Indices of VCF samples that overlap with model
-) -> Result<Array1<f64>, Box<dyn std::error::Error>> {
+) -> Result<(Array1<f64>, f64), Box<dyn std::error::Error>> {
     
     let n_samples_out = vcf_indices.len();
     let mut g = Array1::zeros(n_samples_out);
 
     if vcf_field == "DS" {
         let dosages = record.format(b"DS").float()?;
+        
+        // Check if we have dosage data
+        if dosages.is_empty() {
+            return Err("No DS (dosage) field found in VCF record".into());
+        }
+        
         for (i, &vcf_idx) in vcf_indices.iter().enumerate() {
+            if vcf_idx >= dosages.len() {
+                return Err(format!("VCF index {} out of bounds (dosages len: {})", vcf_idx, dosages.len()).into());
+            }
+            if dosages[vcf_idx].is_empty() {
+                return Err(format!("Empty dosage for sample index {}", vcf_idx).into());
+            }
             g[i] = dosages[vcf_idx][0] as f64; // DS is usually Float, take first value
         }
     } else if vcf_field == "GT" {
@@ -205,18 +305,36 @@ fn extract_genotypes(
         let genotypes = record.genotypes()?;
         for (i, &vcf_idx) in vcf_indices.iter().enumerate() {
             let gt = genotypes.get(vcf_idx);
-            let g_val = (gt[0].index().unwrap_or(0) + gt[1].index().unwrap_or(0)) as f64;
+            let allele1 = gt[0].index().unwrap_or(0);
+            let allele2 = gt[1].index().unwrap_or(0);
+            let g_val = (allele1 + allele2) as f64;
             g[i] = g_val;
         }
     } else {
-        return Err(format!("VCF field '{}' not supported.", vcf_field).into());
+        return Err(format!("VCF field '{}' not supported. Use 'DS' or 'GT'.", vcf_field).into());
     }
     
-    // Center genotypes
+    // Calculate MAC BEFORE centering
+    // MAC = Minor Allele Count
+    // For DS: sum of dosages (already represents allele count)
+    // For GT: sum of allele counts
+    let allele_sum = g.sum();
+    let allele_count = n_samples_out as f64 * 2.0; // Diploid
+    
+    // MAC is the minimum of (alt allele count, ref allele count)
+    let mac = allele_sum.min(allele_count - allele_sum);
+    
+    // Calculate stats for debugging
+    let mean_before = g.mean().unwrap_or(0.0);
+    
+    log::trace!("Genotype extraction: mean={:.4}, allele_sum={:.4}, MAC={:.4}, n_samples={}", 
+               mean_before, allele_sum, mac, n_samples_out);
+    
+    // Center genotypes for association testing
     let mean = g.mean().unwrap_or(0.0);
     g.mapv_inplace(|v| v - mean);
     
-    Ok(g)
+    Ok((g, mac))
 }
 
 /// Performs the score test
