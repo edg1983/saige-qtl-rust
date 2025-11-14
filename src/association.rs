@@ -160,7 +160,10 @@ pub fn run_parallel_tests(
             }
 
             // 3. Run Score Test (uses centered genotypes)
-            let (score, var) = score_test(&g, &p_x, &p_x_res);
+            let (score, var2) = score_test(&g, &p_x, &p_x_res);
+            
+            // Apply variance ratio correction (matches R SAIGE: var1 = var2 * varRatio)
+            let var = var2 * null_model.var_ratio;
             
             if var <= 1e-6 { 
                 log::trace!("Variant {}:{}:{} has insufficient variance: {:.2e}", chr, pos, rsid, var);
@@ -168,8 +171,7 @@ pub fn run_parallel_tests(
             }
 
             // 4. Calculate effect size (BETA) and standard error (SE)
-            // BETA = Score / Variance
-            // SE = 1 / sqrt(Variance)
+            // SAIGE formula: beta = Score / var1, se = |beta| / sqrt(|stat|), where stat = Score^2 / var1
             let beta = score / var;
             let se = 1.0 / var.sqrt();
 
@@ -185,8 +187,8 @@ pub fn run_parallel_tests(
                 run_spa(score, &g, &mu, &y).unwrap_or(1.0)
             };
             
-            log::trace!("Variant {}:{}:{} passed: MAC={:.2}, beta={:.4}, se={:.4}, pval={:.2e}", 
-                       chr, pos, rsid, mac, beta, se, pval);
+            log::trace!("Variant {}:{}:{} passed: MAC={:.2}, beta={:.4}, se={:.4}, pval={:.2e}, var2={:.4}, var_ratio={:.4}", 
+                       chr, pos, rsid, mac, beta, se, pval, var2, null_model.var_ratio);
             
             Some(AssocResult {
                 chr, // This is now a String

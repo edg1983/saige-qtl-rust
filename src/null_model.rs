@@ -218,10 +218,14 @@ impl PrecomputedComponents {
         let sigma_e2 = y_p_y / (n_donors - n_covars) as f64;
         let sigma_g2 = self.optimal_tau * sigma_e2;
         
-        log::debug!("Gene fitting complete: sigma_g2={:.6}, sigma_e2={:.6}", sigma_g2, sigma_e2);
+        // Calculate variance ratio for association testing
+        let var_ratio = sigma_g2 / sigma_e2;
+        
+        log::debug!("Gene fitting complete: sigma_g2={:.6}, sigma_e2={:.6}, var_ratio={:.6}", sigma_g2, sigma_e2, var_ratio);
         
         Ok(NullModelFit {
             variance_components: vec![sigma_g2, sigma_e2],
+            var_ratio,
             fixed_effects: beta.to_vec(),
             residuals,
             p_x_matrix,
@@ -457,9 +461,17 @@ pub fn fit_null_glmm(
     // For LMM, mu = X*beta
     let mu = aligned_data.x.dot(&beta);
     let residuals = &aligned_data.y - &mu;
+    
+    // Calculate variance ratio for association testing
+    let var_ratio = if variance_components.len() >= 2 && variance_components[1] > 0.0 {
+        variance_components[0] / variance_components[1]
+    } else {
+        1.0  // Default to 1.0 if only one component or division by zero
+    };
 
     Ok(NullModelFit {
         variance_components,
+        var_ratio,
         fixed_effects: beta.to_vec(),
         residuals,
         // CORRECTED: `p_x_matrix` is 2D, matching the struct

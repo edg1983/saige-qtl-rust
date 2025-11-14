@@ -18,6 +18,8 @@ use ndarray::{Array1, Array2};
 pub struct NullModelFit {
     /// Estimated variance components (e.g., [sigma_g, sigma_e])
     pub variance_components: Vec<f64>,
+    /// Variance ratio: tau_genetic / tau_residual, used for score test variance adjustment
+    pub var_ratio: f64,
     /// Fixed-effect coefficients (beta)
     pub fixed_effects: Vec<f64>,
     /// Residuals at convergence (y - mu)
