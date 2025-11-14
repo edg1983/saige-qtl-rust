@@ -47,16 +47,19 @@ struct Cli {
     #[arg(long, required = true)]
     trait_name: String,
 
-    /// Column name for sample IDs in phenotype file
-    /// For single-cell data, this should be the CELL ID column
+    /// Column name for sample/donor IDs in phenotype file
+    /// This column should match the sample IDs in the GRM/PLINK files
+    /// For bulk data: use this column for both sample identification and genotype matching
+    /// For single-cell data: this column contains donor IDs that match genotypes
     #[arg(long, required = true)]
     sample_id_col: String,
     
-    /// Column name for donor IDs in phenotype file (for single-cell data)
-    /// For bulk data, leave empty (donor_ids will equal sample_ids)
-    /// For single-cell data, this maps cells to donors for genotype matching
+    /// Column name for cell IDs in phenotype file (for single-cell data only)
+    /// For single-cell data: this column contains unique cell identifiers
+    /// For bulk data: leave empty (not needed)
+    /// When provided, enables single-cell mode where multiple cells map to one donor
     #[arg(long)]
-    donor_id_col: Option<String>,
+    cell_id_col: Option<String>,
     
     /// Column name for sample IDs in sample covariate file
     #[arg(long, default_value = "IID")]
@@ -149,8 +152,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let aligned_data = load_aligned_data(
         &cli.pheno_covar_file,
         &cli.trait_name,
-        &cli.sample_id_col,
-        cli.donor_id_col.as_deref(),  // NEW: Pass donor ID column
+        &cli.sample_id_col,        // Donor/sample ID column (matches GRM)
+        cli.cell_id_col.as_deref(), // Optional cell ID column (for single-cell)
         cell_covariate_cols,
         &master_sample_ids,
     )?;

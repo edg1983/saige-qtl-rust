@@ -35,8 +35,8 @@ pub struct AlignedData {
 pub fn load_aligned_data(
     pheno_covar_file: &Path,
     trait_name: &str,
-    sample_id_col: &str,
-    donor_id_col: Option<&str>,  // NEW: Optional donor ID column
+    sample_id_col: &str,      // Donor/sample ID column (matches GRM)
+    cell_id_col: Option<&str>, // Optional cell ID column (for single-cell data)
     covariate_cols: &[String],
     master_sample_ids: &[String],
 ) -> Result<AlignedData, IoError> {
@@ -103,16 +103,36 @@ pub fn load_aligned_data(
     
     log::info!("Phenotype vector has {} values", y.len());
 
-    // 4. Extract sample IDs from filtered data
-    let sample_ids: Vec<String> = filtered_data
+    // 4. Extract donor IDs (from sample_id_col - these match the GRM)
+    let donor_ids: Vec<String> = filtered_data
         .column(sample_id_col)?
         .str()?
         .into_iter()
         .map(|opt_s| opt_s.map(String::from))
         .collect::<Option<Vec<String>>>()
-        .ok_or(IoError::Alignment("Failed to extract sample IDs from filtered data".into()))?;
+        .ok_or(IoError::Alignment("Failed to extract donor IDs from filtered data".into()))?;
 
-    // 5. Extract covariate columns and create design matrix with intercept
+    // 5. Extract cell IDs if specified (for single-cell data), otherwise use donor IDs
+    let sample_ids = if let Some(cell_col) = cell_id_col {
+        log::info!("Extracting cell IDs from column '{}' (single-cell mode)", cell_col);
+        
+        // Cast cell ID column to string
+        let cell_id_series = filtered_data.column(cell_col)?.clone();
+        let cell_id_as_str = cell_id_series.cast(&DataType::String)?;
+        
+        cell_id_as_str
+            .str()?
+            .into_iter()
+            .map(|opt_s| opt_s.map(String::from))
+            .collect::<Option<Vec<String>>>()
+            .ok_or(IoError::Alignment(format!("Cell ID column '{}' contains nulls", cell_col)))?
+    } else {
+        // For bulk data, sample IDs = donor IDs
+        log::info!("No cell ID column specified - using donor IDs as sample IDs (bulk data mode)");
+        donor_ids.clone()
+    };
+
+    // 6. Extract covariate columns and create design matrix with intercept
     let n_samples = filtered_data.height();
     let n_covars = covariate_cols.len();
     
@@ -155,34 +175,16 @@ pub fn load_aligned_data(
         )));
     }
     
-    // 6. Extract donor IDs if specified (for single-cell data)
-    let donor_ids = if let Some(donor_col) = donor_id_col {
-        log::info!("Extracting donor IDs from column '{}'", donor_col);
-        
-        // Cast donor ID column to string
-        let donor_id_series = filtered_data.column(donor_col)?.clone();
-        let donor_id_as_str = donor_id_series.cast(&DataType::String)?;
-        
-        donor_id_as_str
-            .str()?
-            .into_iter()
-            .map(|opt_s| opt_s.map(String::from))
-            .collect::<Option<Vec<String>>>()
-            .ok_or(IoError::Alignment(format!("Donor ID column '{}' contains nulls", donor_col)))?
-    } else {
-        // For bulk data, donor IDs = sample IDs
-        log::info!("No donor ID column specified - using sample IDs as donor IDs (bulk data mode)");
-        sample_ids.clone()
-    };
-    
-    if donor_ids.len() != n_samples {
+    // Validate that donor_ids and sample_ids have the same length
+    if donor_ids.len() != n_samples || sample_ids.len() != n_samples {
         return Err(IoError::Alignment(format!(
-            "Donor ID vector has {} values but expected {} samples",
-            donor_ids.len(), n_samples
+            "Dimension mismatch: donor_ids ({}), sample_ids ({}), n_samples ({})",
+            donor_ids.len(), sample_ids.len(), n_samples
         )));
     }
     
-    log::info!("Data alignment completed successfully: {} samples with {} covariates", n_samples, n_covars);
+    log::info!("Data alignment completed successfully: {} samples ({} unique donors) with {} covariates", 
+              n_samples, donor_ids.iter().collect::<std::collections::HashSet<_>>().len(), n_covars);
 
     Ok(AlignedData { y, x, sample_ids, donor_ids })
 }
