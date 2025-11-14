@@ -4,7 +4,7 @@
 //! 1. Full REML optimization (standard approach)
 //! 2. Fast two-stage approach for single-cell data (precompute donor model, quick per-gene fitting)
 use crate::{NullModelFit, TraitType, io::AlignedData};
-use ndarray::{Array1, Array2, s};
+use ndarray::{Array1, Array2};
 // CORRECTED: Import `Solve` trait
 use ndarray_linalg::{Cholesky, Inverse, Solve};
 use rayon::prelude::*;

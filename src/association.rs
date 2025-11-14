@@ -109,7 +109,7 @@ pub fn run_parallel_tests(
     // Buffer records for parallel processing and extract metadata that requires header access
     // This avoids capturing the non-Sync header in the parallel closure
     let mut record_data: Vec<_> = Vec::new();
-    let mut total_variants = 0;
+    let mut total_variants: usize = 0;
     
     log::info!("Reading variants from VCF...");
     for record_result in vcf.records() {
@@ -138,11 +138,6 @@ pub fn run_parallel_tests(
     }
 
     log::info!("Processing variants in parallel...");
-    
-    let mut genotype_extraction_failed = 0;
-    let mut mac_filtered = 0;
-    let mut no_variance = 0;
-    let mut successful = 0;
 
     let results: Vec<AssocResult> = record_data
         .into_par_iter()

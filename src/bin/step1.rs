@@ -116,7 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ===================================================================
     // 1. Determine master sample list
     // ===================================================================
-    let master_sample_ids = if let Some(grm_file) = &cli.grm_file {
+    let master_sample_ids = if let Some(_grm_file) = &cli.grm_file {
         // Using pre-computed GRM: get unique samples from phenotype file
         log::info!("Using pre-computed GRM mode");
         log::info!("Getting unique sample IDs from phenotype/covariate file...");
