@@ -52,8 +52,9 @@ impl PrecomputedComponents {
     pub fn compute_donor_level(
         donor_grm: &Array2<f64>,
         donor_covariates: &Array2<f64>, // Donor-level covariates only (e.g., PCs, donor age/sex)
-        donor_sample_ids: &[String],
-        cell_sample_ids: &[String], // All cell-level sample IDs
+        donor_sample_ids: &[String],    // Unique donor IDs (matches GRM rows/cols)
+        cell_sample_ids: &[String],     // Cell IDs (one per cell, for identification)
+        cell_donor_ids: &[String],      // Donor ID for each cell (maps cells to donors)
         tau_init: f64,
         max_iter: u64,
         eps: f64,
@@ -62,13 +63,14 @@ impl PrecomputedComponents {
         log::info!("Donors: {}, Cells: {}", donor_sample_ids.len(), cell_sample_ids.len());
         
         // Build cell-to-donor mapping
-        let cell_to_donor: Vec<usize> = cell_sample_ids
+        // For each cell, find which donor it belongs to
+        let cell_to_donor: Vec<usize> = cell_donor_ids
             .iter()
-            .map(|cell_id| {
+            .map(|donor_id| {
                 donor_sample_ids
                     .iter()
-                    .position(|donor_id| donor_id == cell_id)
-                    .expect("Cell sample ID not found in donor list")
+                    .position(|d| d == donor_id)
+                    .unwrap_or_else(|| panic!("Donor ID '{}' from cell data not found in donor list", donor_id))
             })
             .collect();
         

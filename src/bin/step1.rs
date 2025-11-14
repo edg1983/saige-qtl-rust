@@ -217,8 +217,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let precomputed = PrecomputedComponents::compute_donor_level(
             &donor_grm,
             &x_sample,
-            &master_sample_ids,
-            &aligned_data.sample_ids,
+            &master_sample_ids,        // Unique donor IDs (matches GRM)
+            &aligned_data.sample_ids,   // Cell IDs (for identification)
+            &aligned_data.donor_ids,    // Donor ID for each cell (for mapping)
             cli.tau_init[0],
             cli.max_iter,
             cli.tol,
