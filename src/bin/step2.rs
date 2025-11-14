@@ -35,26 +35,6 @@ struct Cli {
     #[arg(long, default_value = "DS")]
     vcf_field: String,
 
-    /// Path to the phenotype file (for sample alignment, not strictly needed if model is good)
-    #[arg(long, required = true)]
-    pheno_file: PathBuf,
-    
-    /// Column name in the phenotype file for sample IDs
-    #[arg(long, required = true)]
-    sample_id_in_pheno: String,
-
-    /// Column name in the phenotype file for the trait (gene)
-    #[arg(long, required = true)]
-    trait_name: String,
-
-    /// Path to the covariate file (for sample alignment)
-    #[arg(long, required = true)]
-    covar_file: PathBuf,
-
-    /// Column name in the covariate file for sample IDs
-    #[arg(long, required = true)]
-    sample_id_in_covar: String,
-
     /// Path to the fitted null model file from Step 1
     #[arg(long, required = true)]
     step1_output_file: PathBuf,
@@ -71,10 +51,6 @@ struct Cli {
     #[arg(long, default_value_t = 0.5)]
     min_mac: f64,
 
-    /// Number of lines to buffer from VCF (not used in this parallel model)
-    #[arg(long)]
-    num_lines: Option<usize>,
-
     /// Number of threads to use
     #[arg(long, default_value_t = 1)]
     n_threads: usize,
@@ -84,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let cli = Cli::parse();
 
-    log::info!("Starting Step 2: Running Association Tests for {}", cli.trait_name);
+    log::info!("Starting Step 2: Running Association Tests");
     log::info!("Using {} threads", cli.n_threads);
 
     // Set thread pool
@@ -100,13 +76,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reader = BufReader::new(file);
     let null_model: NullModelFit = bincode::deserialize_from(reader)?;
     
-    if null_model.gene_name != cli.trait_name {
-        log::warn!(
-            "Model gene name '{}' does not match CLI trait name '{}'",
-            null_model.gene_name, cli.trait_name
-        );
-    }
-    log::info!("Loaded model for trait type: {:?}", null_model.trait_type);
+    log::info!("Loaded null model for gene: {}", null_model.gene_name);
+    log::info!("Trait type: {:?}", null_model.trait_type);
+    log::info!("Number of samples in model: {}", null_model.sample_ids.len());
 
     // ===================================================================
     // 2. Prepare Output File
@@ -137,6 +109,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.min_mac,
     )?;
 
-    log::info!("Step 2 for {} completed successfully.", cli.trait_name);
+    log::info!("Step 2 for {} completed successfully.", null_model.gene_name);
     Ok(())
 }

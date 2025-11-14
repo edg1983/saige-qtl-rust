@@ -22,6 +22,7 @@ struct AssocResult {
     se: f64,
     pval: f64,
     mac: f64,
+    n_samples: usize,
 }
 
 /// Helper to parse region strings like "chr1:1-100000"
@@ -196,6 +197,7 @@ pub fn run_parallel_tests(
                 se,
                 pval,
                 mac,
+                n_samples: model_indices.len(),
             })
         })
         .collect();
