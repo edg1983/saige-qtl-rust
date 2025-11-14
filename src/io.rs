@@ -224,3 +224,160 @@ pub fn get_unique_sample_ids(
     
     Ok(unique_ids)
 }
+
+/// Loads sample-level covariates from a separate file (one row per sample/donor)
+/// Returns a matrix with one row per sample, aligned to the provided sample_ids
+pub fn load_sample_covariates(
+    sample_covar_file: &Path,
+    sample_id_col: &str,
+    sample_covariate_cols: &[String],
+    sample_ids: &[String], // Master list of samples to align to
+) -> Result<Array2<f64>, IoError> {
+    log::info!("Loading sample-level covariates from {:?}", sample_covar_file);
+    log::info!("Expected {} samples", sample_ids.len());
+    
+    // Load the sample covariate file
+    let mut data_df = CsvReadOptions::default()
+        .with_has_header(true)
+        .with_parse_options(
+            CsvParseOptions::default()
+                .with_separator(b'\t')
+        )
+        .try_into_reader_with_file_path(Some(sample_covar_file.into()))?
+        .finish()?;
+    
+    log::info!("Loaded sample covariate file with {} rows", data_df.height());
+    
+    // Cast sample ID column to string
+    let sample_id_series = data_df.column(sample_id_col)?.clone();
+    let sample_id_as_str = sample_id_series.cast(&DataType::String)?;
+    data_df.replace(sample_id_col, sample_id_as_str)?;
+    
+    // Check that all required samples are present
+    let available_samples: std::collections::HashSet<String> = data_df
+        .column(sample_id_col)?
+        .str()?
+        .into_iter()
+        .filter_map(|opt_s| opt_s.map(String::from))
+        .collect();
+    
+    let missing_samples: Vec<&String> = sample_ids
+        .iter()
+        .filter(|id| !available_samples.contains(*id))
+        .collect();
+    
+    if !missing_samples.is_empty() {
+        return Err(IoError::Alignment(format!(
+            "Sample covariate file is missing {} samples. First few: {:?}",
+            missing_samples.len(),
+            missing_samples.iter().take(5).collect::<Vec<_>>()
+        )));
+    }
+    
+    log::info!("All {} required samples found in covariate file", sample_ids.len());
+    
+    let n_samples = sample_ids.len();
+    let n_covars = sample_covariate_cols.len();
+    
+    // Build design matrix with intercept
+    let mut x_sample = Array2::zeros((n_samples, n_covars + 1));
+    x_sample.column_mut(0).fill(1.0); // Intercept
+    
+    // For each sample in our master list, extract their covariates
+    for (sample_idx, sample_id) in sample_ids.iter().enumerate() {
+        // Find this sample in the data_df
+        let sample_row = data_df
+            .column(sample_id_col)?
+            .str()?
+            .into_iter()
+            .position(|id_opt| id_opt == Some(sample_id.as_str()))
+            .ok_or_else(|| IoError::Alignment(format!("Sample {} not found in data", sample_id)))?;
+        
+        // Extract covariates for this sample
+        for (cov_idx, covar_name) in sample_covariate_cols.iter().enumerate() {
+            let val = data_df
+                .column(covar_name)?
+                .f64()?
+                .get(sample_row)
+                .ok_or_else(|| IoError::Alignment(format!("Missing covariate {} for sample {}", covar_name, sample_id)))?;
+            
+            x_sample[[sample_idx, cov_idx + 1]] = val;
+        }
+    }
+    
+    log::info!("Sample covariate matrix: {} samples x {} covariates (+ intercept)", n_samples, n_covars + 1);
+    
+    Ok(x_sample)
+}
+
+/// Loads donor-level covariates (covariates that vary by donor, not by cell)
+/// Returns a matrix with one row per unique donor
+pub fn load_donor_covariates(
+    pheno_covar_file: &Path,
+    sample_id_col: &str,
+    donor_covariate_cols: &[String],
+    donor_sample_ids: &[String],
+) -> Result<Array2<f64>, IoError> {
+    log::info!("Loading donor-level covariates from {:?}", pheno_covar_file);
+    
+    // Load the data
+    let mut data_df = CsvReadOptions::default()
+        .with_has_header(true)
+        .with_parse_options(
+            CsvParseOptions::default()
+                .with_separator(b'\t')
+        )
+        .try_into_reader_with_file_path(Some(pheno_covar_file.into()))?
+        .finish()?;
+    
+    // Cast sample ID column to string
+    let sample_id_series = data_df.column(sample_id_col)?.clone();
+    let sample_id_as_str = sample_id_series.cast(&DataType::String)?;
+    data_df.replace(sample_id_col, sample_id_as_str)?;
+    
+    // Group by sample ID and take the first row for each donor
+    // (donor-level covariates should be the same for all cells from a donor)
+    let donor_df = data_df
+        .lazy()
+        .group_by([col(sample_id_col)])
+        .agg([
+            col(sample_id_col).first().alias(sample_id_col),
+        ]
+        .into_iter()
+        .chain(donor_covariate_cols.iter().map(|c| col(c).first().alias(c)))
+        .collect::<Vec<_>>())
+        .collect()?;
+    
+    let n_donors = donor_sample_ids.len();
+    let n_covars = donor_covariate_cols.len();
+    
+    // Build design matrix with intercept
+    let mut x_donor = Array2::zeros((n_donors, n_covars + 1));
+    x_donor.column_mut(0).fill(1.0); // Intercept
+    
+    // For each donor in our master list, extract their covariates
+    for (donor_idx, donor_id) in donor_sample_ids.iter().enumerate() {
+        // Find this donor in the donor_df
+        let donor_row = donor_df
+            .column(sample_id_col)?
+            .str()?
+            .into_iter()
+            .position(|id_opt| id_opt == Some(donor_id.as_str()))
+            .ok_or_else(|| IoError::Alignment(format!("Donor {} not found in data", donor_id)))?;
+        
+        // Extract covariates for this donor
+        for (cov_idx, covar_name) in donor_covariate_cols.iter().enumerate() {
+            let val = donor_df
+                .column(covar_name)?
+                .f64()?
+                .get(donor_row)
+                .ok_or_else(|| IoError::Alignment(format!("Missing covariate {} for donor {}", covar_name, donor_id)))?;
+            
+            x_donor[[donor_idx, cov_idx + 1]] = val;
+        }
+    }
+    
+    log::info!("Donor covariate matrix: {} donors x {} covariates (+ intercept)", n_donors, n_covars + 1);
+    
+    Ok(x_donor)
+}

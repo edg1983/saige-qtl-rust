@@ -1,6 +1,10 @@
 //! Module for fitting the Null GLMM via AI-REML.
+//! 
+//! This module provides two fitting strategies:
+//! 1. Full REML optimization (standard approach)
+//! 2. Fast two-stage approach for single-cell data (precompute donor model, quick per-gene fitting)
 use crate::{NullModelFit, TraitType, io::AlignedData};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, s};
 // CORRECTED: Import `Solve` trait
 use ndarray_linalg::{Cholesky, Inverse, Solve};
 use rayon::prelude::*;
@@ -25,6 +29,209 @@ pub enum ModelError {
     Dimensions(String),
     #[error("Optimization setup error: {0}")]
     Setup(String),
+}
+
+/// Precomputed components for fast single-cell fitting
+/// These components are computed once at the donor level and reused for all genes
+pub struct PrecomputedComponents {
+    /// Donor-level V^-1 = (tau*G + I)^-1
+    pub donor_v_inv: Array2<f64>,
+    /// Donor-level covariates (X_donor)
+    pub donor_x: Array2<f64>,
+    /// Mapping from cell index to donor index
+    pub cell_to_donor: Vec<usize>,
+    /// Optimal tau from donor-level optimization
+    pub optimal_tau: f64,
+    /// Donor-level GRM
+    pub donor_grm: Array2<f64>,
+}
+
+impl PrecomputedComponents {
+    /// Precompute donor-level components that will be reused for all genes
+    /// This does the expensive REML optimization once at the donor level
+    pub fn compute_donor_level(
+        donor_grm: &Array2<f64>,
+        donor_covariates: &Array2<f64>, // Donor-level covariates only (e.g., PCs, donor age/sex)
+        donor_sample_ids: &[String],
+        cell_sample_ids: &[String], // All cell-level sample IDs
+        tau_init: f64,
+        max_iter: u64,
+        eps: f64,
+    ) -> Result<Self, ModelError> {
+        log::info!("=== Precomputing donor-level model components ===");
+        log::info!("Donors: {}, Cells: {}", donor_sample_ids.len(), cell_sample_ids.len());
+        
+        // Build cell-to-donor mapping
+        let cell_to_donor: Vec<usize> = cell_sample_ids
+            .iter()
+            .map(|cell_id| {
+                donor_sample_ids
+                    .iter()
+                    .position(|donor_id| donor_id == cell_id)
+                    .expect("Cell sample ID not found in donor list")
+            })
+            .collect();
+        
+        log::info!("Built cell-to-donor mapping for {} cells", cell_to_donor.len());
+        
+        // For donor-level optimization, create a pseudo-phenotype (we'll use zeros)
+        // since we only care about variance component estimation
+        let n_donors = donor_sample_ids.len();
+        let y_donor = Array1::zeros(n_donors);
+        
+        let cost_function = RemlCost {
+            y: y_donor,
+            x: donor_covariates.clone(),
+            grm: donor_grm.clone(),
+        };
+        
+        let lower_bound = 1e-6;
+        let upper_bound = 100.0;
+        
+        let solver = BrentOpt::new(lower_bound, upper_bound)
+            .set_tolerance(eps, eps);
+        
+        log::info!("Starting donor-level REML optimization for tau...");
+        let res = Executor::new(cost_function, solver)
+            .configure(|state| state.param(tau_init).max_iters(max_iter))
+            .run()
+            .map_err(|e| ModelError::Convergence(e.to_string()))?;
+        
+        let optimal_tau = res.state.best_param
+            .ok_or_else(|| ModelError::Convergence("No best parameter found".to_string()))?;
+        
+        log::info!("Donor-level REML converged. Optimal tau = {:.6}", optimal_tau);
+        
+        // Compute donor-level V_inv with optimal tau
+        log::info!("Computing donor-level V^-1 matrix...");
+        let mut v_donor = donor_grm * optimal_tau;
+        v_donor.diag_mut().mapv_inplace(|v_ii| v_ii + 1.0);
+        
+        let chol_v = v_donor.cholesky(ndarray_linalg::UPLO::Lower)
+            .map_err(|e| ModelError::LinAlg(e.to_string()))?;
+        
+        // Compute V_inv by solving against identity
+        let donor_v_inv_cols: Vec<Array1<f64>> = (0..n_donors)
+            .into_par_iter()
+            .map(|j| {
+                let mut col = Array1::zeros(n_donors);
+                col[j] = 1.0;
+                chol_v.solve(&col)
+                    .map_err(|e| ModelError::LinAlg(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        
+        let mut donor_v_inv = Array2::zeros((n_donors, n_donors));
+        for (j, col_data) in donor_v_inv_cols.into_iter().enumerate() {
+            donor_v_inv.column_mut(j).assign(&col_data);
+        }
+        
+        log::info!("Donor-level components precomputed successfully");
+        
+        Ok(PrecomputedComponents {
+            donor_v_inv,
+            donor_x: donor_covariates.clone(),
+            cell_to_donor,
+            optimal_tau,
+            donor_grm: donor_grm.clone(),
+        })
+    }
+    
+    /// Fast cell-level fitting for a single gene using precomputed donor components
+    /// This avoids expensive REML optimization and works directly with donor components
+    pub fn fit_gene_fast(
+        &self,
+        y_cells: &Array1<f64>, // Gene expression at cell level
+        x_cells: &Array2<f64>, // Cell-level covariates (includes donor + cell covariates)
+        sample_ids: &[String],
+    ) -> Result<NullModelFit, ModelError> {
+        let n_cells = y_cells.len();
+        let n_covars = x_cells.ncols();
+        let n_donors = self.donor_v_inv.nrows();
+        
+        log::debug!("Fast fitting: {} cells, {} donors, {} covariates", n_cells, n_donors, n_covars);
+        
+        // Key optimization: Instead of expanding donor_v_inv to cell level (expensive),
+        // we aggregate cells to donors, compute at donor level, then disaggregate
+        
+        // Step 1: Aggregate y_cells and x_cells to donor level by averaging
+        log::debug!("Aggregating cells to donor level...");
+        let mut y_donor_agg = Array1::zeros(n_donors);
+        let mut x_donor_agg = Array2::zeros((n_donors, n_covars));
+        let mut cell_counts = vec![0usize; n_donors];
+        
+        for (cell_idx, &donor_idx) in self.cell_to_donor.iter().enumerate() {
+            y_donor_agg[donor_idx] += y_cells[cell_idx];
+            for cov_idx in 0..n_covars {
+                x_donor_agg[[donor_idx, cov_idx]] += x_cells[[cell_idx, cov_idx]];
+            }
+            cell_counts[donor_idx] += 1;
+        }
+        
+        // Average by cell count per donor
+        for donor_idx in 0..n_donors {
+            let count = cell_counts[donor_idx] as f64;
+            if count > 0.0 {
+                y_donor_agg[donor_idx] /= count;
+                for cov_idx in 0..n_covars {
+                    x_donor_agg[[donor_idx, cov_idx]] /= count;
+                }
+            }
+        }
+        
+        // Step 2: Compute at donor level using precomputed V_inv
+        log::debug!("Computing donor-level model components...");
+        let v_inv_y_donor = self.donor_v_inv.dot(&y_donor_agg);
+        let v_inv_x_donor = self.donor_v_inv.dot(&x_donor_agg);
+        
+        let x_t_v_inv_x = x_donor_agg.t().dot(&v_inv_x_donor);
+        let x_t_v_inv_y = x_donor_agg.t().dot(&v_inv_y_donor);
+        
+        log::debug!("Inverting X^T V^-1 X...");
+        let x_t_v_inv_x_inv = x_t_v_inv_x.inv()
+            .map_err(|e| ModelError::LinAlg(e.to_string()))?;
+        
+        // Fixed effects (donor level)
+        let beta = x_t_v_inv_x_inv.dot(&x_t_v_inv_y);
+        
+        // Step 3: Map results back to cell level
+        log::debug!("Mapping results to cell level...");
+        
+        // Fitted values at cell level using cell-level covariates
+        let mu = x_cells.dot(&beta);
+        let residuals = y_cells - &mu;
+        
+        // Compute P matrix at donor level
+        let p_donor = &self.donor_v_inv - v_inv_x_donor.dot(&x_t_v_inv_x_inv).dot(&v_inv_x_donor.t());
+        
+        // Expand P matrix to cell level
+        log::debug!("Expanding P matrix to cell level...");
+        let p_x_matrix = Array2::from_shape_fn((n_cells, n_cells), |(i, j)| {
+            let donor_i = self.cell_to_donor[i];
+            let donor_j = self.cell_to_donor[j];
+            p_donor[[donor_i, donor_j]]
+        });
+        
+        // Estimate variance components using donor-level aggregated residuals
+        let p_y_donor = &v_inv_y_donor - v_inv_x_donor.dot(&beta);
+        let y_p_y = y_donor_agg.dot(&p_y_donor);
+        let sigma_e2 = y_p_y / (n_donors - n_covars) as f64;
+        let sigma_g2 = self.optimal_tau * sigma_e2;
+        
+        log::debug!("Gene fitting complete: sigma_g2={:.6}, sigma_e2={:.6}", sigma_g2, sigma_e2);
+        
+        Ok(NullModelFit {
+            variance_components: vec![sigma_g2, sigma_e2],
+            fixed_effects: beta.to_vec(),
+            residuals,
+            p_x_matrix,
+            mu,
+            y: y_cells.clone(),
+            gene_name: "STUB".to_string(),
+            trait_type: TraitType::Quantitative,
+            sample_ids: sample_ids.to_vec(),
+        })
+    }
 }
 
 /// This struct holds the state for the REML optimization
