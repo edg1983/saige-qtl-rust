@@ -89,8 +89,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .delimiter(b'\t')
         .from_writer(out_writer_gz);
         
-    // Write header
-    csv_writer.write_record(&["chr", "pos", "rsid", "gene", "beta", "se", "pval", "mac"])?;
+    // Note: csv::Writer with serialize() automatically writes headers from struct field names
+    // No need to write header manually
 
     // ===================================================================
     // 3. Run Association Tests
