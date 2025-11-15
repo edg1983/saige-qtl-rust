@@ -76,6 +76,38 @@ impl PrecomputedComponents {
         
         log::info!("Built cell-to-donor mapping for {} cells", cell_to_donor.len());
         
+        // Diagnostics: Check GRM properties
+        let diag_mean = donor_grm.diag().mean().unwrap_or(0.0);
+        let diag_min = donor_grm.diag().iter().copied().fold(f64::INFINITY, f64::min);
+        let diag_max = donor_grm.diag().iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        
+        log::info!("GRM diagnostics:");
+        log::info!("  Diagonal: min={:.6}, max={:.6}, mean={:.6}", diag_min, diag_max, diag_mean);
+        
+        // Calculate off-diagonal statistics
+        let mut off_diag_vals = Vec::new();
+        for i in 0..donor_grm.nrows() {
+            for j in 0..donor_grm.ncols() {
+                if i != j {
+                    off_diag_vals.push(donor_grm[[i, j]]);
+                }
+            }
+        }
+        if !off_diag_vals.is_empty() {
+            off_diag_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let off_diag_min = off_diag_vals[0];
+            let off_diag_max = off_diag_vals[off_diag_vals.len() - 1];
+            let off_diag_median = off_diag_vals[off_diag_vals.len() / 2];
+            log::info!("  Off-diagonal: min={:.6}, max={:.6}, median={:.6}", 
+                      off_diag_min, off_diag_max, off_diag_median);
+        }
+        
+        // Check for NaN or Inf
+        let has_nan = donor_grm.iter().any(|&x| !x.is_finite());
+        if has_nan {
+            return Err(ModelError::LinAlg("GRM contains NaN or Inf values".to_string()));
+        }
+        
         // For donor-level optimization, create a pseudo-phenotype (we'll use zeros)
         // since we only care about variance component estimation
         let n_donors = donor_sample_ids.len();
@@ -284,14 +316,43 @@ impl CostFunction for RemlCost {
         let k = self.x.ncols() as f64;
         
         // 1. Form V = tau*G + I
+        // CRITICAL FIX: Ensure V is positive definite by adding small regularization if needed
         let mut v = &self.grm * tau;
-        v.diag_mut().mapv_inplace(|v_ii| v_ii + 1.0); // V = tau*G + I*sigma_e^2 (we factor out sigma_e^2)
+        
+        // Check if diagonal elements are reasonable after multiplication by tau
+        // The new GRM formula uses theoretical variance, which can result in smaller diagonal values
+        let min_diag_before = v.diag().iter().copied().fold(f64::INFINITY, f64::min);
+        let max_diag_before = v.diag().iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        
+        // Add identity to diagonal: V = tau*G + I
+        v.diag_mut().mapv_inplace(|v_ii| v_ii + 1.0);
+        
+        let min_diag_after = v.diag().iter().copied().fold(f64::INFINITY, f64::min);
+        
+        // If diagonal is still too small (< 0.01), add regularization
+        // This can happen if GRM diagonal values are very small or negative
+        let regularization = if min_diag_after < 0.01 {
+            let reg = (0.01 - min_diag_after).max(1e-6);
+            log::trace!("Adding regularization {:.6} to V (min_diag={:.6})", reg, min_diag_after);
+            reg
+        } else {
+            0.0
+        };
+        
+        if regularization > 0.0 {
+            v.diag_mut().mapv_inplace(|v_ii| v_ii + regularization);
+        }
 
         // 2. Cholesky decomposition of V
         let chol_v = match v.cholesky(ndarray_linalg::UPLO::Lower) {
             Ok(c) => c,
-            // If V is not positive-definite, optimization is bad
-            Err(e) => return Err(Error::from(ModelError::LinAlg(e.to_string()))),
+            // If V is not positive-definite, return high cost instead of error
+            Err(e) => {
+                // Log at debug level for first few failures
+                log::debug!("Cholesky failed for tau={:.6}: {} (diag range: [{:.6}, {:.6}])", 
+                           tau, e, min_diag_before, max_diag_before);
+                return Ok(1e100);
+            }
         };
 
         // 3. Calculate components for log-likelihood

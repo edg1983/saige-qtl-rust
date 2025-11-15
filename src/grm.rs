@@ -375,7 +375,10 @@ pub fn build_grm_from_plink_filtered(
     log::info!("GRM computed with shape {:?}", grm.dim());
     
     // Log some diagnostic statistics
-    let diag_mean = (0..n_samples).map(|i| grm[[i, i]]).sum::<f64>() / n_samples as f64;
+    let diag_mean_before = (0..n_samples).map(|i| grm[[i, i]]).sum::<f64>() / n_samples as f64;
+    let diag_min = (0..n_samples).map(|i| grm[[i, i]]).fold(f64::INFINITY, f64::min);
+    let diag_max = (0..n_samples).map(|i| grm[[i, i]]).fold(f64::NEG_INFINITY, f64::max);
+    
     let mut off_diag_sum = 0.0;
     let mut off_diag_count = 0;
     for i in 0..n_samples {
@@ -389,10 +392,19 @@ pub fn build_grm_from_plink_filtered(
     let off_diag_mean = if off_diag_count > 0 { off_diag_sum / off_diag_count as f64 } else { 0.0 };
     
     log::info!("GRM diagnostics:");
-    log::info!("  Mean diagonal: {:.6}", diag_mean);
+    log::info!("  Diagonal: mean={:.6}, min={:.6}, max={:.6}", diag_mean_before, diag_min, diag_max);
     log::info!("  Mean off-diagonal: {:.6}", off_diag_mean);
     log::info!("  Note: In R SAIGE-QTL with isDiagofKinSetAsOne=FALSE, diagonal = sum(std_geno^2)/M");
-    log::info!("        If diagonal should be 1.0, use isDiagofKinSetAsOne=TRUE in future implementation");
+    log::info!("        With theoretical variance sqrt(2*p*(1-p)), mean diagonal should be close to 1.0");
+    log::info!("        If diagonal should be exactly 1.0, use --is-diag-of-kin-set-as-one");
+    
+    // IMPORTANT: R SAIGE-QTL does NOT normalize the GRM!
+    // The diagonal is kept as sum(std_geno^2)/M, which should be close to 1.0 but may deviate
+    // due to:
+    // - Hardy-Weinberg Equilibrium deviations
+    // - Missing data patterns
+    // - Population structure
+    // This is the CORRECT behavior to match R exactly.
     
     Ok(grm)
 }
