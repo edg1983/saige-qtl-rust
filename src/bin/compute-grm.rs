@@ -47,6 +47,13 @@ struct Cli {
     /// If specified, sets GRM[i,j] = 0 for all i≠j where |GRM[i,j]| < cutoff
     #[arg(long)]
     relatedness_cutoff: Option<f64>,
+
+    /// Whether to set diagonal elements of GRM to 1.0
+    /// Matches R SAIGE-QTL --isDiagofKinSetAsOne parameter
+    /// If false (default), diagonal = sum(standardized_genotype^2) / M (computed from data)
+    /// If true, diagonal is forced to 1.0 (assumes perfect self-relatedness)
+    #[arg(long, default_value_t = false)]
+    is_diag_of_kin_set_as_one: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -66,6 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(cutoff) = cli.relatedness_cutoff {
         log::info!("  relatednessCutoff = {}", cutoff);
     }
+    log::info!("  isDiagofKinSetAsOne = {}", cli.is_diag_of_kin_set_as_one);
 
     // Set the global thread pool for rayon
     rayon::ThreadPoolBuilder::new()
@@ -79,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Compute GRM with filtering
     log::info!("Computing GRM from PLINK file...");
-    let grm = build_grm_from_plink_filtered(
+    let mut grm = build_grm_from_plink_filtered(
         &cli.plink_file,
         cli.n_threads,
         cli.min_maf_for_grm,
@@ -89,6 +97,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     
     log::info!("GRM computed: {} x {} matrix", grm.nrows(), grm.ncols());
+
+    // Apply isDiagofKinSetAsOne if requested
+    // MATCHES R SAIGE-QTL: get_DiagofKin() returns 1.0 if isDiagofKinSetAsOne=TRUE
+    if cli.is_diag_of_kin_set_as_one {
+        log::info!("Setting GRM diagonal to 1.0 (isDiagofKinSetAsOne=TRUE)");
+        for i in 0..grm.nrows() {
+            grm[[i, i]] = 1.0;
+        }
+        log::info!("Diagonal set to 1.0 for all {} samples", grm.nrows());
+    }
 
     // Save GRM with sample IDs to file
     log::info!("Saving GRM to {:?}", cli.output_file);

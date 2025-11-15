@@ -177,7 +177,8 @@ pub fn build_grm_from_plink(
     build_grm_from_plink_filtered(plink_file_no_ext, n_threads, 0.0, 1.0, None, None)
 }
 
-/// Calculates the GRM with full filtering options
+/// Calculates the GRM with full filtering options matching R SAIGE-QTL
+/// Uses the EXACT formulas from R C++ code to ensure numerical compatibility
 pub fn build_grm_from_plink_filtered(
     plink_file_no_ext: &Path,
     n_threads: usize,
@@ -215,13 +216,13 @@ pub fn build_grm_from_plink_filtered(
     );
 
     // 1. Calculate MAF and missing rate for each variant, and filter
+    // MATCHES R SAIGE-QTL: GENO_null.cpp lines 318-326
     log::info!("Filtering variants by MAF and missing rate...");
     let variant_stats: Vec<(f64, f64, f64, f64)> = genotype_matrix
         .axis_iter(Axis(0)) // Iterate over rows (variants)
         .into_par_iter()
         .map(|row| {
             let mut sum = 0.0;
-            let mut sum_sq = 0.0;
             let mut count = 0;
             let mut missing_count = 0;
             
@@ -229,7 +230,6 @@ pub fn build_grm_from_plink_filtered(
                 if g_code != i8::MIN { // i8::MIN (-128) is missing in bed-reader
                     let g = g_code as f64;
                     sum += g;
-                    sum_sq += g * g;
                     count += 1;
                 } else {
                     missing_count += 1;
@@ -240,17 +240,22 @@ pub fn build_grm_from_plink_filtered(
             let missing_rate = if total > 0 { missing_count as f64 / total as f64 } else { 1.0 };
             
             if count == 0 {
-                return (0.0, 1.0, 1.0, 0.0); // No data: mean=0, var=1, missing_rate=1, maf=0
+                return (0.0, 1.0, 1.0, 0.0); // No data: freq=0, std=1, missing_rate=1, maf=0
             }
             
-            let mean = sum / count as f64;
-            let var = (sum_sq / count as f64) - (mean * mean);
+            // R SAIGE-QTL formula (GENO_null.cpp line 318):
+            // altFreq = alleleCount/float((Nnomissing-numMissing) * 2)
+            let freq = sum / (count as f64 * 2.0);
             
-            // Calculate MAF: mean / 2 gives allele frequency, MAF is min(freq, 1-freq)
-            let freq = mean / 2.0;
+            // R SAIGE-QTL formula (GENO_null.cpp lines 783-786):
+            // Std = std::sqrt(2*freq*(1-freq));
+            // CRITICAL: Use theoretical binomial variance, NOT empirical variance!
+            let std_dev = (2.0 * freq * (1.0 - freq)).sqrt();
+            
+            // Calculate MAF: min(freq, 1-freq)
             let maf = freq.min(1.0 - freq);
             
-            (mean, var.max(1e-6), missing_rate, maf)
+            (freq, std_dev.max(1e-6), missing_rate, maf)
         })
         .collect();
 
@@ -271,6 +276,7 @@ pub fn build_grm_from_plink_filtered(
     }
     
     // 2. Random marker selection if requested
+    // MATCHES R SAIGE-QTL: SAIGE_createSparseGRM.R lines 75-87
     if let Some(n_random) = num_random_markers {
         if n_random < valid_indices.len() {
             use rand::seq::SliceRandom;
@@ -289,16 +295,20 @@ pub fn build_grm_from_plink_filtered(
     log::info!("Using {} markers for GRM calculation", n_markers_used);
 
     // 3. Center and standardize genotypes (only for selected markers)
+    // MATCHES R SAIGE-QTL standardization formula (GENO_null.cpp lines 34-45):
+    // stdGenoLookUpArr(g) = (g - 2*freq) * invStd
+    // where invStd = 1 / sqrt(2*freq*(1-freq))
     // We parallelize over variants (rows)
-    let genotype_means_vars: Vec<(f64, f64)> = valid_indices
+    let genotype_freq_std: Vec<(f64, f64)> = valid_indices
         .par_iter()
         .map(|&idx| variant_stats[idx])
-        .map(|(mean, var, _, _)| {
-            if var < 1e-6 {
-                (mean, 1.0) // Set std_dev to 1.0 to avoid division by zero
+        .map(|(freq, std_dev, _, _)| {
+            let inv_std = if std_dev < 1e-6 {
+                0.0 // Zero variance: set to 0 to avoid division by zero
             } else {
-                (mean, var)
-            }
+                1.0 / std_dev
+            };
+            (freq, inv_std)
         })
         .collect();
 
@@ -310,18 +320,22 @@ pub fn build_grm_from_plink_filtered(
         .axis_iter_mut(Axis(0))
         .into_par_iter()
         .zip(valid_indices.par_iter())
-        .zip(genotype_means_vars.par_iter())
-        .for_each(|((mut out_row, &var_idx), &(mean, var))| {
-            let std_dev = var.sqrt();
+        .zip(genotype_freq_std.par_iter())
+        .for_each(|((mut out_row, &var_idx), &(freq, inv_std))| {
             let in_row = genotype_matrix.row(var_idx);
+            let mean_geno = 2.0 * freq; // Mean genotype = 2 * allele frequency
+            
             for (out_g, &in_g) in out_row.iter_mut().zip(in_row.iter()) {
                 if in_g != i8::MIN {
                     let g_f = in_g as f64;
-                    let standardized = (g_f - mean) / std_dev;
+                    // R SAIGE-QTL formula: (g - 2*freq) * invStd
+                    let standardized = (g_f - mean_geno) * inv_std;
                     // Scale by 32 for i8 storage efficiency
                     *out_g = (standardized * 32.0).round() as i8;
                 } else {
-                    *out_g = 0; // Impute missing to 0 after standardization (mean = 0)
+                    // Missing values: impute to 0 after standardization (mean = 0)
+                    // MATCHES R: Missing (3) becomes 0 after centering
+                    *out_g = 0;
                 }
             }
         });
@@ -331,6 +345,9 @@ pub fn build_grm_from_plink_filtered(
     let genotypes_f64: Array2<f64> = selected_genotypes.mapv(|x| x as f64 / 32.0);
 
     // 5. Compute GRM = (1/M) * X^T * X
+    // MATCHES R SAIGE-QTL formula (GENO_null.cpp lines 541-580):
+    // Diagonal: m_DiagStd = sum(stdGeno^2) for each sample, then divided by M
+    // Off-diagonal: Kinship = sum(stdGeno_i * stdGeno_j) / M
     // X is (n_markers_used, n_samples), so X^T is (n_samples, n_markers_used)
     // GRM is (n_samples, n_samples)
     log::info!("Computing GRM ({} x {})...", n_samples, n_samples);
@@ -338,8 +355,10 @@ pub fn build_grm_from_plink_filtered(
     let mut grm = xt.dot(&genotypes_f64) / (n_markers_used as f64);
 
     // 6. Apply relatedness cutoff (sparsification) if requested
+    // MATCHES R SAIGE-QTL: refineKin() in SAIGE_createSparseGRM.R line 153
+    // Sets off-diagonal values < cutoff to 0, keeps diagonal as-is
     if let Some(cutoff) = relatedness_cutoff {
-        log::info!("Applying relatedness cutoff: setting values < {} to 0", cutoff);
+        log::info!("Applying relatedness cutoff: setting off-diagonal values < {} to 0", cutoff);
         let mut n_zeroed = 0;
         for i in 0..n_samples {
             for j in 0..n_samples {
@@ -354,5 +373,26 @@ pub fn build_grm_from_plink_filtered(
     }
 
     log::info!("GRM computed with shape {:?}", grm.dim());
+    
+    // Log some diagnostic statistics
+    let diag_mean = (0..n_samples).map(|i| grm[[i, i]]).sum::<f64>() / n_samples as f64;
+    let mut off_diag_sum = 0.0;
+    let mut off_diag_count = 0;
+    for i in 0..n_samples {
+        for j in 0..n_samples {
+            if i != j {
+                off_diag_sum += grm[[i, j]];
+                off_diag_count += 1;
+            }
+        }
+    }
+    let off_diag_mean = if off_diag_count > 0 { off_diag_sum / off_diag_count as f64 } else { 0.0 };
+    
+    log::info!("GRM diagnostics:");
+    log::info!("  Mean diagonal: {:.6}", diag_mean);
+    log::info!("  Mean off-diagonal: {:.6}", off_diag_mean);
+    log::info!("  Note: In R SAIGE-QTL with isDiagofKinSetAsOne=FALSE, diagonal = sum(std_geno^2)/M");
+    log::info!("        If diagonal should be 1.0, use isDiagofKinSetAsOne=TRUE in future implementation");
+    
     Ok(grm)
 }
